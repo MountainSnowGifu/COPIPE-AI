@@ -1,3 +1,6 @@
+mod command;
+use command::{parse_commands, AiCommand};
+
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
@@ -337,15 +340,29 @@ async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Result<usize> {
     Ok(n as usize)
 }
 
+fn print_blocks(blocks: &[String]) {
+    for block in blocks {
+        match parse_commands(block) {
+            Ok(cmds) => {
+                for cmd in &cmds {
+                    println!("{cmd:#?}");
+                }
+            }
+            Err(e) => {
+                // デシリアライズ失敗時は生 JSON を表示
+                eprintln!("デシリアライズ失敗 ({e}): {block}");
+            }
+        }
+    }
+    println!();
+}
+
 async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> anyhow::Result<()> {
     session.send(prompt).await?;
     let n = ai_message_count(&session.page).await?;
     let blocks = get_codeblocks_from_dom(&session.page, n).await;
     if !blocks.is_empty() {
-        for block in &blocks {
-            println!("{block}");
-        }
-        println!();
+        print_blocks(&blocks);
         return Ok(());
     }
 
@@ -354,13 +371,11 @@ async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> any
     let n2 = ai_message_count(&session.page).await?;
     let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
     if !blocks2.is_empty() {
-        for block in &blocks2 {
-            println!("{block}");
-        }
+        print_blocks(&blocks2);
     } else {
         eprintln!("コードブロックが取得できませんでした");
+        println!();
     }
-    println!();
     Ok(())
 }
 
