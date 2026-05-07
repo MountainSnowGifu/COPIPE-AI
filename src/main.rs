@@ -118,15 +118,29 @@ struct CopilotSession {
     page: chromiumoxide::Page,
     edge: Child,
     handle: tokio::task::JoinHandle<()>,
-    // 送信済みメッセージ数（応答の重複取得を避けるため）
-    sent_count: usize,
+}
+
+impl Drop for CopilotSession {
+    fn drop(&mut self) {
+        self.handle.abort();
+        self.edge.kill().ok();
+        self.edge.wait().ok(); // zombie 化防止
+    }
 }
 
 impl CopilotSession {
     async fn start() -> anyhow::Result<Self> {
         let port = free_port();
-        let edge = launch_edge(port);
-        let ws_url = get_ws_url(port).await?;
+        // 起動直後に失敗しても kill+wait できるよう先に保持
+        let mut edge = launch_edge(port);
+        let ws_url = match get_ws_url(port).await {
+            Ok(u) => u,
+            Err(e) => {
+                edge.kill().ok();
+                edge.wait().ok();
+                return Err(e);
+            }
+        };
 
         let (browser, mut handler) = Browser::connect(&ws_url).await?;
         let handle = tokio::spawn(async move {
@@ -164,21 +178,29 @@ impl CopilotSession {
         wait_for_element(&page, "#userInput", 20).await?;
         eprintln!("準備完了");
 
-        Ok(Self { page, edge, handle, sent_count: 0 })
+        Ok(Self { page, edge, handle })
     }
 
     async fn send(&mut self, prompt: &str) -> anyhow::Result<String> {
         let page = &self.page;
 
-        // JS で focus（クリックだとマイクボタンに当たる場合があるため）
+        // 送信前の ai-message 数を baseline として記録
+        let baseline = page
+            .evaluate_expression(
+                r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
+            )
+            .await
+            .ok()
+            .and_then(|r| r.value().and_then(|v| v.as_f64()))
+            .unwrap_or(0.0) as usize;
+
+        // JS で focus
         wait_for_element(page, "#userInput", 10).await?;
-        page.evaluate_expression(
-            "document.querySelector('#userInput').focus()"
-        ).await?;
+        page.evaluate_expression("document.querySelector('#userInput').focus()").await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // 日本語対応: JS で value をセットして React イベントを発火
-        let escaped = prompt.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        // serde_json で安全な JS 文字列リテラルに変換
+        let js_str = serde_json::to_string(prompt)?;
         page.evaluate_expression(&format!(r#"
             (function() {{
                 const el = document.querySelector('#userInput');
@@ -186,15 +208,16 @@ impl CopilotSession {
                 const setter = Object.getOwnPropertyDescriptor(
                     window.HTMLTextAreaElement.prototype, 'value'
                 ).set;
-                setter.call(el, "{escaped}");
-                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                setter.call(el, {js_str});
+                el.dispatchEvent(new Event('input',  {{ bubbles: true }}));
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 return 'ok';
             }})()
-        "#)).await?;
+        "#))
+        .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // 送信（IIFE でスコープを閉じて変数名衝突を防ぐ）
+        // 送信
         page.evaluate_expression(r#"
             (function() {
                 var el = document.querySelector('#userInput');
@@ -202,21 +225,14 @@ impl CopilotSession {
                 el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true}));
                 el.dispatchEvent(new KeyboardEvent('keyup',   {key: 'Enter', code: 'Enter', bubbles: true}));
             })();
-        "#).await?;
-
+        "#)
+        .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        self.sent_count += 1;
-        let expected_count = self.sent_count;
-
-        // 今回の応答（n番目の ai-message）が出るまで待つ
-        let response = wait_for_nth_response(page, expected_count, 90).await?;
+        // baseline + 1 番目の応答を待つ
+        let expected = baseline + 1;
+        let response = wait_for_nth_response(page, expected, 90).await?;
         Ok(response)
-    }
-
-    fn close(mut self) {
-        self.handle.abort();
-        self.edge.kill().ok();
     }
 }
 
@@ -296,9 +312,19 @@ async fn wait_for_nth_response(
     }
 }
 
+async fn ai_message_count(page: &chromiumoxide::Page) -> usize {
+    page.evaluate_expression(
+        r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
+    )
+    .await
+    .ok()
+    .and_then(|r| r.value().and_then(|v| v.as_f64()))
+    .unwrap_or(0.0) as usize
+}
+
 async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> anyhow::Result<()> {
     session.send(prompt).await?;
-    let n = session.sent_count;
+    let n = ai_message_count(&session.page).await;
     let blocks = get_codeblocks_from_dom(&session.page, n).await;
     if !blocks.is_empty() {
         for block in &blocks {
@@ -310,7 +336,7 @@ async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> any
 
     eprintln!("コードブロックなし → JSON で返すよう要求します");
     session.send("返答をコードブロック付きの JSON 形式で出力してください。").await?;
-    let n2 = session.sent_count;
+    let n2 = ai_message_count(&session.page).await;
     let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
     if !blocks2.is_empty() {
         for block in &blocks2 {
@@ -373,6 +399,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("終了します");
-    session.close();
+    drop(session); // Drop が kill + wait を実行
     Ok(())
 }
