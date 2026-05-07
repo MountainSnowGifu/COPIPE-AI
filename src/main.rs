@@ -1,119 +1,14 @@
+mod browser;
 mod command;
+use browser::{free_port, launch_edge};
 use command::parse_commands;
 
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
 use futures::StreamExt;
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::Duration;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("空きポートが見つかりません")
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn browser_candidates() -> Vec<PathBuf> {
-    if let Ok(path) = std::env::var("COPIPE_BROWSER_PATH") {
-        if !path.trim().is_empty() {
-            return vec![PathBuf::from(path)];
-        }
-    }
-
-    if cfg!(target_os = "windows") {
-        let mut candidates = vec![PathBuf::from(
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        )];
-        for var in ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"] {
-            if let Ok(base) = std::env::var(var) {
-                candidates.push(PathBuf::from(&base).join("Microsoft/Edge/Application/msedge.exe"));
-                candidates.push(PathBuf::from(&base).join("Google/Chrome/Application/chrome.exe"));
-            }
-        }
-        candidates
-    } else {
-        vec![
-            PathBuf::from("/usr/bin/microsoft-edge"),
-            PathBuf::from("/usr/bin/microsoft-edge-stable"),
-            PathBuf::from("/usr/bin/google-chrome"),
-            PathBuf::from("/usr/bin/chromium"),
-        ]
-    }
-}
-
-fn browser_profile_dir() -> PathBuf {
-    let base = if cfg!(target_os = "windows") {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-    } else {
-        std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(".config"))
-            .unwrap_or_else(|| std::env::temp_dir().join("copipe-ai"))
-    };
-
-    base.join("copipe-ai-browser-profile")
-}
-
-fn cleanup_singleton_files(profile_dir: &Path) {
-    for file in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
-        let _ = std::fs::remove_file(profile_dir.join(file));
-    }
-}
-
-fn launch_edge(port: u16) -> anyhow::Result<Child> {
-    let profile_dir = browser_profile_dir();
-    std::fs::create_dir_all(&profile_dir)?;
-    cleanup_singleton_files(&profile_dir);
-
-    let mut tried = Vec::new();
-    for candidate in browser_candidates() {
-        let candidate_exists = candidate.is_absolute().then(|| candidate.exists()).unwrap_or(true);
-        if !candidate_exists {
-            tried.push(format!("{} (missing)", candidate.display()));
-            continue;
-        }
-
-        let mut command = Command::new(&candidate);
-        command
-            .arg(format!("--remote-debugging-port={port}"))
-            .arg("--disable-blink-features=AutomationControlled")
-            .arg(format!("--user-data-dir={}", profile_dir.display()))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-
-        if !cfg!(target_os = "windows") {
-            command
-                .arg("--no-sandbox")
-                .arg("--disable-dev-shm-usage")
-                .env("DISPLAY", ":0")
-                .env("WAYLAND_DISPLAY", "wayland-0");
-        }
-
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                tried.push(format!("{} (not found)", candidate.display()));
-            }
-            Err(err) => {
-                return Err(anyhow::anyhow!(
-                    "ブラウザの起動に失敗しました: {} ({err})",
-                    candidate.display()
-                ));
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "起動可能な Chromium 系ブラウザが見つかりません。COPIPE_BROWSER_PATH を設定するか、Microsoft Edge / Google Chrome をインストールしてください。候補: {}",
-        tried.join(", ")
-    ))
-}
 
 async fn get_ws_url(port: u16) -> anyhow::Result<String> {
     let url = format!("http://127.0.0.1:{port}/json/version");
@@ -149,10 +44,35 @@ async fn wait_for_element(
     }
 }
 
-/// n 番目の ai-message 内の <pre><code> から JSON として妥当なブロックのみ返す
+async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<chromiumoxide::Page> {
+    let page = browser.new_page("about:blank").await?;
+    page.execute(
+        SetDeviceMetricsOverrideParams::builder()
+            .width(1280u32)
+            .height(800u32)
+            .device_scale_factor(1.0)
+            .mobile(false)
+            .build()
+            .map_err(|e| anyhow::anyhow!(e))?,
+    )
+    .await?;
+    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})",
+    ))
+    .await?;
+    eprintln!("Loading Copilot...");
+    page.goto("https://copilot.microsoft.com").await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    eprintln!("Waiting for input...");
+    wait_for_element(&page, "#userInput", 20).await?;
+    eprintln!("Ready.");
+    Ok(page)
+}
+
 async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
     let raw = page
-        .evaluate_expression(&format!(r#"
+        .evaluate_expression(&format!(
+            r#"
             (() => {{
                 const msgs = document.querySelectorAll('[data-testid="ai-message"]');
                 if (msgs.length < {n}) return '';
@@ -161,7 +81,8 @@ async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<St
                 const blocks = [...el.querySelectorAll('pre > code')];
                 return blocks.map(b => b.innerText.trim()).filter(t => t).join('\x00');
             }})()
-        "#))
+        "#
+        ))
         .await
         .ok()
         .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
@@ -186,7 +107,12 @@ fn extract_ai_text(raw: &str) -> String {
         .or_else(|| text.strip_prefix("Copilot の発言"))
         .unwrap_or(text);
     // 末尾の UI テキスト（ページ内編集ボタン、引用リンクなど）を切り落とす
-    let cutoffs = ["\nページ内で編集します", "\nFluentU", "\nhanabira", "\n参照:"];
+    let cutoffs = [
+        "\nページ内で編集します",
+        "\nFluentU",
+        "\nhanabira",
+        "\n参照:",
+    ];
     let mut text = text;
     for cutoff in &cutoffs {
         if let Some(pos) = text.find(cutoff) {
@@ -195,7 +121,6 @@ fn extract_ai_text(raw: &str) -> String {
     }
     text.trim().to_string()
 }
-
 
 struct CopilotSession {
     page: chromiumoxide::Page,
@@ -209,6 +134,50 @@ impl Drop for CopilotSession {
         self.edge.kill().ok();
         self.edge.wait().ok(); // zombie 化防止
     }
+}
+
+async fn focus_input(page: &chromiumoxide::Page) -> anyhow::Result<()> {
+    wait_for_element(page, "#userInput", 10).await?;
+    page.evaluate_expression("document.querySelector('#userInput').focus()")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    Ok(())
+}
+
+async fn set_input_value(page: &chromiumoxide::Page, prompt: &str) -> anyhow::Result<()> {
+    let js_str = serde_json::to_string(prompt)?;
+    page.evaluate_expression(&format!(
+        r#"
+        (function() {{
+            const el = document.querySelector('#userInput');
+            if (!el) return 'not found';
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLTextAreaElement.prototype, 'value'
+            ).set;
+            setter.call(el, {js_str});
+            el.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return 'ok';
+        }})()
+    "#
+    ))
+    .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    Ok(())
+}
+
+async fn submit_input(page: &chromiumoxide::Page) -> anyhow::Result<()> {
+    page.evaluate_expression(r#"
+        (function() {
+            var el = document.querySelector('#userInput');
+            if (!el) return;
+            el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true}));
+            el.dispatchEvent(new KeyboardEvent('keyup',   {key: 'Enter', code: 'Enter', bubbles: true}));
+        })();
+    "#)
+    .await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    Ok(())
 }
 
 impl CopilotSession {
@@ -243,34 +212,7 @@ impl CopilotSession {
                 }
             }
         });
-
-        // init 内で失敗したら handle を abort してから伝播
-        let setup = async {
-            let page = browser.new_page("about:blank").await?;
-            page.execute(
-                SetDeviceMetricsOverrideParams::builder()
-                    .width(1280u32)
-                    .height(800u32)
-                    .device_scale_factor(1.0)
-                    .mobile(false)
-                    .build()
-                    .map_err(|e| anyhow::anyhow!(e))?,
-            )
-            .await?;
-            page.execute(AddScriptToEvaluateOnNewDocumentParams::new(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})",
-            ))
-            .await?;
-            eprintln!("Copilot を読み込み中...");
-            page.goto("https://copilot.microsoft.com").await?;
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            eprintln!("入力欄を待機中...");
-            wait_for_element(&page, "#userInput", 20).await?;
-            eprintln!("準備完了");
-            anyhow::Ok(page)
-        };
-
-        match setup.await {
+        match prepare_copilot_page(&browser).await {
             Ok(page) => Ok((page, handle)),
             Err(e) => {
                 handle.abort();
@@ -283,49 +225,13 @@ impl CopilotSession {
 
     async fn send(&mut self, prompt: &str) -> anyhow::Result<String> {
         let page = &self.page;
-
-        // 送信前の ai-message 数を baseline として記録
         let baseline = ai_message_count(page).await?;
 
-        // JS で focus
-        wait_for_element(page, "#userInput", 10).await?;
-        page.evaluate_expression("document.querySelector('#userInput').focus()").await?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        focus_input(page).await?;
+        set_input_value(page, prompt).await?;
+        submit_input(page).await?;
 
-        // serde_json で安全な JS 文字列リテラルに変換
-        let js_str = serde_json::to_string(prompt)?;
-        page.evaluate_expression(&format!(r#"
-            (function() {{
-                const el = document.querySelector('#userInput');
-                if (!el) return 'not found';
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(el, {js_str});
-                el.dispatchEvent(new Event('input',  {{ bubbles: true }}));
-                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return 'ok';
-            }})()
-        "#))
-        .await?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // 送信
-        page.evaluate_expression(r#"
-            (function() {
-                var el = document.querySelector('#userInput');
-                if (!el) return;
-                el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true}));
-                el.dispatchEvent(new KeyboardEvent('keyup',   {key: 'Enter', code: 'Enter', bubbles: true}));
-            })();
-        "#)
-        .await?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // baseline + 1 番目の応答を待つ
-        let expected = baseline + 1;
-        let response = wait_for_nth_response(page, expected, 90).await?;
-        Ok(response)
+        wait_for_nth_response(page, baseline + 1, 90).await
     }
 }
 
@@ -335,63 +241,51 @@ async fn wait_for_nth_response(
     timeout_secs: u64,
 ) -> anyhow::Result<String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    wait_for_ai_message_count(page, n, deadline).await?;
+    wait_for_stable_ai_text(page, n, deadline).await
+}
 
-    // n番目の ai-message が出現するまで待つ
-    eprintln!("応答開始を待機中...");
+async fn wait_for_ai_message_count(
+    page: &chromiumoxide::Page,
+    n: usize,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    eprintln!("Waiting for response to start...");
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let count = page
-            .evaluate_expression(r#"document.querySelectorAll('[data-testid="ai-message"]').length"#)
-            .await
-            .ok()
-            .and_then(|r| r.value().and_then(|v| v.as_f64()))
-            .unwrap_or(0.0) as usize;
+        let count = ai_message_count(page).await.unwrap_or(0);
         if count >= n {
-            eprintln!("応答開始を検出");
-            break;
+            eprintln!("Response detected.");
+            return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("応答開始タイムアウト");
+            anyhow::bail!("Timed out waiting for response to start");
         }
     }
+}
 
-    // テキストが5秒安定するまで待つ
-    eprintln!("生成完了を待機中...");
+async fn wait_for_stable_ai_text(
+    page: &chromiumoxide::Page,
+    n: usize,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<String> {
+    eprintln!("Waiting for response to finish...");
     let mut last_text = String::new();
     let mut stable_secs = 0u64;
 
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // n番目のメッセージを取得
-        let raw = page
-            .evaluate_expression(&format!(r#"
-                (() => {{
-                    const msgs = document.querySelectorAll('[data-testid="ai-message"]');
-                    if (msgs.length < {n}) return '';
-                    const el = msgs[{n} - 1];
-                    const clone = el.cloneNode(true);
-                    ['[data-testid="message-item-reactions"]', 'button', 'cite', '.supcontainer']
-                        .forEach(sel => clone.querySelectorAll(sel).forEach(e => e.remove()));
-                    return clone.innerText.trim();
-                }})()
-            "#))
-            .await
-            .ok()
-            .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-            .unwrap_or_default();
-
-        let text = extract_ai_text(&raw);
+        let text = read_nth_ai_text(page, n).await;
 
         if !text.is_empty() && text == last_text {
             stable_secs += 1;
-            eprintln!("安定中 {stable_secs}/10 ({} 文字)", text.len());
+            eprintln!("Stable {stable_secs}/10 ({} chars)", text.len());
             if stable_secs >= 10 {
-                eprintln!("生成完了");
+                eprintln!("Response finished.");
                 return Ok(text);
             }
         } else if !text.is_empty() {
-            eprintln!("生成中... ({} 文字)", text.len());
+            eprintln!("Generating... ({} chars)", text.len());
             stable_secs = 0;
             last_text = text;
         }
@@ -400,16 +294,37 @@ async fn wait_for_nth_response(
             if !last_text.is_empty() {
                 return Ok(last_text);
             }
-            anyhow::bail!("応答タイムアウト");
+            anyhow::bail!("Timed out waiting for response text");
         }
     }
 }
 
+async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> String {
+    let raw = page
+        .evaluate_expression(&format!(
+            r#"
+            (() => {{
+                const msgs = document.querySelectorAll('[data-testid="ai-message"]');
+                if (msgs.length < {n}) return '';
+                const el = msgs[{n} - 1];
+                const clone = el.cloneNode(true);
+                ['[data-testid="message-item-reactions"]', 'button', 'cite', '.supcontainer']
+                    .forEach(sel => clone.querySelectorAll(sel).forEach(e => e.remove()));
+                return clone.innerText.trim();
+            }})()
+        "#
+        ))
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+        .unwrap_or_default();
+
+    extract_ai_text(&raw)
+}
+
 async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Result<usize> {
     let n = page
-        .evaluate_expression(
-            r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
-        )
+        .evaluate_expression(r#"document.querySelectorAll('[data-testid="ai-message"]').length"#)
         .await?
         .value()
         .and_then(|v| v.as_f64())
@@ -444,7 +359,9 @@ async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> any
     }
 
     eprintln!("コードブロックなし → JSON で返すよう要求します");
-    session.send("返答をコードブロック付きの JSON 形式で出力してください。").await?;
+    session
+        .send("返答をコードブロック付きの JSON 形式で出力してください。")
+        .await?;
     let n2 = ai_message_count(&session.page).await?;
     let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
     if !blocks2.is_empty() {
@@ -464,7 +381,8 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("Copilot に接続しました。");
 
     // p.txt が存在すれば最初の質問として送る
-    let initial_prompt = std::fs::read_to_string("p.txt").ok()
+    let initial_prompt = std::fs::read_to_string("p.txt")
+        .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
