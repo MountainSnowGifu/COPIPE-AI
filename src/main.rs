@@ -69,7 +69,7 @@ async fn wait_for_element(
     }
 }
 
-/// 最後の ai-message 内の <pre><code> からコードブロックを取得
+/// n 番目の ai-message 内の <pre><code> から JSON として妥当なブロックのみ返す
 async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
     let raw = page
         .evaluate_expression(&format!(r#"
@@ -77,7 +77,8 @@ async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<St
                 const msgs = document.querySelectorAll('[data-testid="ai-message"]');
                 if (msgs.length < {n}) return '';
                 const el = msgs[{n} - 1];
-                const blocks = [...el.querySelectorAll('pre code, code')];
+                // pre > code のみ（インラインコードは除外）
+                const blocks = [...el.querySelectorAll('pre > code')];
                 return blocks.map(b => b.innerText.trim()).filter(t => t).join('\x00');
             }})()
         "#))
@@ -92,6 +93,8 @@ async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<St
     raw.split('\x00')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        // JSON として妥当なブロックのみ採用
+        .filter(|s| serde_json::from_str::<serde_json::Value>(s).is_ok())
         .collect()
 }
 
@@ -131,16 +134,25 @@ impl Drop for CopilotSession {
 impl CopilotSession {
     async fn start() -> anyhow::Result<Self> {
         let port = free_port();
-        // 起動直後に失敗しても kill+wait できるよう先に保持
         let mut edge = launch_edge(port);
-        let ws_url = match get_ws_url(port).await {
-            Ok(u) => u,
+
+        // Browser::connect 以降の失敗でも edge を確実に回収するクロージャ
+        let result = Self::init(port, &mut edge).await;
+        match result {
+            Ok((page, handle)) => Ok(Self { page, edge, handle }),
             Err(e) => {
                 edge.kill().ok();
                 edge.wait().ok();
-                return Err(e);
+                Err(e)
             }
-        };
+        }
+    }
+
+    async fn init(
+        port: u16,
+        edge: &mut Child,
+    ) -> anyhow::Result<(chromiumoxide::Page, tokio::task::JoinHandle<()>)> {
+        let ws_url = get_ws_url(port).await?;
 
         let (browser, mut handler) = Browser::connect(&ws_url).await?;
         let handle = tokio::spawn(async move {
@@ -152,47 +164,48 @@ impl CopilotSession {
             }
         });
 
-        let page = browser.new_page("about:blank").await?;
+        // init 内で失敗したら handle を abort してから伝播
+        let setup = async {
+            let page = browser.new_page("about:blank").await?;
+            page.execute(
+                SetDeviceMetricsOverrideParams::builder()
+                    .width(1280u32)
+                    .height(800u32)
+                    .device_scale_factor(1.0)
+                    .mobile(false)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!(e))?,
+            )
+            .await?;
+            page.execute(AddScriptToEvaluateOnNewDocumentParams::new(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})",
+            ))
+            .await?;
+            eprintln!("Copilot を読み込み中...");
+            page.goto("https://copilot.microsoft.com").await?;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            eprintln!("入力欄を待機中...");
+            wait_for_element(&page, "#userInput", 20).await?;
+            eprintln!("準備完了");
+            anyhow::Ok(page)
+        };
 
-        page.execute(
-            SetDeviceMetricsOverrideParams::builder()
-                .width(1280u32)
-                .height(800u32)
-                .device_scale_factor(1.0)
-                .mobile(false)
-                .build()
-                .map_err(|e| anyhow::anyhow!(e))?,
-        )
-        .await?;
-
-        page.execute(AddScriptToEvaluateOnNewDocumentParams::new(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})",
-        ))
-        .await?;
-
-        eprintln!("Copilot を読み込み中...");
-        page.goto("https://copilot.microsoft.com").await?;
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        eprintln!("入力欄を待機中...");
-        wait_for_element(&page, "#userInput", 20).await?;
-        eprintln!("準備完了");
-
-        Ok(Self { page, edge, handle })
+        match setup.await {
+            Ok(page) => Ok((page, handle)),
+            Err(e) => {
+                handle.abort();
+                // edge の kill は呼び出し元で行う
+                let _ = edge;
+                Err(e)
+            }
+        }
     }
 
     async fn send(&mut self, prompt: &str) -> anyhow::Result<String> {
         let page = &self.page;
 
         // 送信前の ai-message 数を baseline として記録
-        let baseline = page
-            .evaluate_expression(
-                r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
-            )
-            .await
-            .ok()
-            .and_then(|r| r.value().and_then(|v| v.as_f64()))
-            .unwrap_or(0.0) as usize;
+        let baseline = ai_message_count(page).await?;
 
         // JS で focus
         wait_for_element(page, "#userInput", 10).await?;
@@ -312,19 +325,21 @@ async fn wait_for_nth_response(
     }
 }
 
-async fn ai_message_count(page: &chromiumoxide::Page) -> usize {
-    page.evaluate_expression(
-        r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
-    )
-    .await
-    .ok()
-    .and_then(|r| r.value().and_then(|v| v.as_f64()))
-    .unwrap_or(0.0) as usize
+async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Result<usize> {
+    let n = page
+        .evaluate_expression(
+            r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
+        )
+        .await?
+        .value()
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| anyhow::anyhow!("ai-message 数の取得に失敗"))?;
+    Ok(n as usize)
 }
 
 async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> anyhow::Result<()> {
     session.send(prompt).await?;
-    let n = ai_message_count(&session.page).await;
+    let n = ai_message_count(&session.page).await?;
     let blocks = get_codeblocks_from_dom(&session.page, n).await;
     if !blocks.is_empty() {
         for block in &blocks {
@@ -336,7 +351,7 @@ async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> any
 
     eprintln!("コードブロックなし → JSON で返すよう要求します");
     session.send("返答をコードブロック付きの JSON 形式で出力してください。").await?;
-    let n2 = ai_message_count(&session.page).await;
+    let n2 = ai_message_count(&session.page).await?;
     let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
     if !blocks2.is_empty() {
         for block in &blocks2 {
