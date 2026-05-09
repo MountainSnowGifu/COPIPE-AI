@@ -9,6 +9,34 @@ use std::io::Write as _;
 
 // ─── エージェントループ ────────────────────────────────────────────────────────
 
+const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
+単一コマンド:
+```json
+{"type": "read_file", "path": "src/main.rs"}
+```
+複数コマンド（配列）:
+```json
+[
+  {"type": "txt", "content": "作業を開始します"},
+  {"type": "cmd", "name": "ビルド", "cmd": ["cargo", "build"], "workdir": ".", "timeout": 60}
+]
+```
+使えるtypeの一覧:
+  read_file / list_dir / file / patch / mkdir / delete_file
+  cmd / txt / read_log / bot / error
+必須フィールド:
+  read_file: path
+  list_dir:  path
+  file:      path, content
+  patch:     path, diff
+  mkdir:     path
+  delete_file: path
+  cmd:       name, cmd(配列), timeout(必須・秒数)
+  txt:       content
+  read_log:  filename(cmd_log/ai_log/ai_readonly)
+  bot:       message
+JSONの後に文章を続けず、コードブロック(```json ... ```)で出力してください。"#;
+
 fn parse_blocks(blocks: &[String]) -> (Vec<crate::command::AiCommand>, Vec<String>) {
     let mut commands = Vec::new();
     let mut errors = Vec::new();
@@ -16,7 +44,7 @@ fn parse_blocks(blocks: &[String]) -> (Vec<crate::command::AiCommand>, Vec<Strin
         match parse_commands(b) {
             Ok(cmds) => commands.extend(cmds),
             Err(e) => errors.push(format!(
-                "JSONパースエラー: {e}\n元のブロック:\n```\n{b}\n```\n正しいスキーマで再出力してください。"
+                "JSONパースエラー: {e}\n\n元のブロック:\n```\n{b}\n```\n\n{SCHEMA_HINT}"
             )),
         }
     }

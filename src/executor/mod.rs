@@ -271,7 +271,8 @@ pub async fn execute(
                                     let stdout = String::from_utf8_lossy(&out.stdout);
                                     let stderr = String::from_utf8_lossy(&out.stderr);
                                     let code = out.status.code().unwrap_or(-1);
-                                    let mut parts = vec![format!("exit: {code}")];
+                                    let prefix = if code == 0 { "" } else { "ERROR: " };
+                                    let mut parts = vec![format!("{prefix}exit: {code}")];
                                     if !stdout.is_empty() {
                                         parts.push(format!("stdout:\n{stdout}"));
                                     }
@@ -308,6 +309,10 @@ pub async fn execute(
                     Ok(abs) => {
                         if !abs.exists() {
                             format!("ERROR: '{path}' が存在しません。patch はファイルが存在する場合のみ使用できます。")
+                        } else if !read_files.contains(&abs) {
+                            format!(
+                                "ERROR: '{path}' は未読です。先に read_file で内容を確認してから patch してください。"
+                            )
                         } else {
                             match std::fs::read_to_string(&abs) {
                                 Err(e) => format!("ERROR: ファイル読み込み失敗: {e}"),

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 /// 実行を許可するコマンド名（allowlist 方式）
 /// mv / cp / touch は file/patch/mkdir で代替できるため除外
 pub const ALLOWED_EXECUTABLES: &[&str] = &[
@@ -36,11 +34,14 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     if exe.starts_with('/') {
         return Err(format!("アクセス拒否: 絶対パス '{exe}' での実行は禁止です"));
     }
+    // 相対パス付き実行（./cargo, tools/git など）は basename allowlist を迂回できるため拒否
+    if exe.contains('/') || exe.contains('\\') {
+        return Err(format!(
+            "アクセス拒否: パス区切りを含む '{exe}' は禁止です。コマンド名のみを指定してください"
+        ));
+    }
 
-    let basename = Path::new(exe)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(exe.as_str());
+    let basename = exe.as_str();
 
     // allowlist: 許可リストにないコマンドはすべて拒否
     if !ALLOWED_EXECUTABLES.contains(&basename) {
