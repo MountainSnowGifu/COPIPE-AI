@@ -282,14 +282,14 @@ async fn wait_for_stable_text(
     let mut stable = 0u64;
 
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
         let text = read_nth_ai_text(page, n).await;
 
         if !text.is_empty() && text == last {
             stable += 1;
-            eprint!("\r安定確認中 {stable}/5 ({} 文字)          ", text.len());
+            eprint!("\r安定確認中 {stable}/3 ({} 文字)          ", text.len());
             std::io::stderr().flush().ok();
-            if stable >= 5 {
+            if stable >= 3 {
                 eprintln!();
                 return Ok(text);
             }

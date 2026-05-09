@@ -70,6 +70,11 @@ pub fn build_system_prompt(root: &std::path::Path) -> String {
 ]
 ```
 
+## 回答の原則（重要）
+
+**[ツール実行結果] を受け取ったら、内容の説明・要約・感想は一切不要です。**
+次の JSON スキーマだけを即座に返してください。
+
 ## 作業の進め方
 
 - 必要な情報は read_file / list_dir で確認してから作業する
