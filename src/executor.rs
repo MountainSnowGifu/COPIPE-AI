@@ -1,7 +1,14 @@
 use crate::command::AiCommand;
 use std::collections::HashSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// セッションログを置くディレクトリ（プロジェクトルート配下）
+const LOG_DIR: &str = ".copipe_logs";
+
+/// read_log で参照できるログ名の allowlist
+const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly"];
 
 pub struct ToolResult {
     pub label: String,
@@ -339,7 +346,10 @@ pub async fn execute(
                                 let _ = std::fs::create_dir_all(parent);
                             }
                             match std::fs::write(&abs, content) {
-                                Ok(_) => "OK".to_string(),
+                                Ok(_) => {
+                                    read_files.insert(abs);
+                                    "OK".to_string()
+                                }
                                 Err(e) => format!("ERROR: {e}"),
                             }
                         }
@@ -453,6 +463,17 @@ pub async fn execute(
                         }
                     }
                 };
+                // cmd_log に追記（失敗しても無視）
+                let log_dir = root.join(LOG_DIR);
+                std::fs::create_dir_all(&log_dir).ok();
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true).append(true)
+                    .open(log_dir.join("cmd_log"))
+                {
+                    let entry = format!("$ {}\n{}\n---\n", cmd.join(" "), output);
+                    f.write_all(entry.as_bytes()).ok();
+                }
+
                 results.push(ToolResult {
                     label: format!("Cmd({name})"),
                     output,
@@ -472,7 +493,6 @@ pub async fn execute(
                                     Ok(patched) => match std::fs::write(&abs, &patched) {
                                         Err(e) => format!("ERROR: 書き込み失敗: {e}"),
                                         Ok(_) => {
-                                            // コンテキスト検証済みなので read_file と同等とみなす
                                             read_files.insert(abs);
                                             "OK".to_string()
                                         }
@@ -488,10 +508,25 @@ pub async fn execute(
                 });
             }
             AiCommand::ReadLog { filename } => {
+                let output = if !ALLOWED_LOGS.contains(&filename.as_str()) {
+                    format!(
+                        "ERROR: 不正なログ名 '{filename}'。使用可能: {}",
+                        ALLOWED_LOGS.join(", ")
+                    )
+                } else {
+                    let log_path = root.join(LOG_DIR).join(filename);
+                    match std::fs::read_to_string(&log_path) {
+                        Ok(s) if s.is_empty() => "(ログは空です)".to_string(),
+                        Ok(s) => s,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            "(ログファイルが存在しません)".to_string()
+                        }
+                        Err(e) => format!("ERROR: {e}"),
+                    }
+                };
                 results.push(ToolResult {
                     label: format!("ReadLog({filename})"),
-                    output: "ERROR: ReadLog は未実装です。read_file を使ってください。"
-                        .to_string(),
+                    output,
                 });
             }
             AiCommand::Error { message, content } => {

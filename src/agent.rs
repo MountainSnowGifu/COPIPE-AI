@@ -26,6 +26,7 @@ JSONの後に文章を続けてはいけません。
 - ファイル削除:   {{"type": "delete_file", "path": "相対パス"}}
 - コマンド実行:   {{"type": "cmd", "name": "説明", "cmd": ["cargo", "build"], "workdir": "相対パス", "timeout": 30}}
 - ユーザーへ表示: {{"type": "txt", "content": "日本語のメッセージ"}}
+- ログ読み取り:   {{"type": "read_log", "filename": "cmd_log"}}（cmd_log / ai_log / ai_readonly のいずれか。読んだ内容を解析し、必要なら次のアクションを自律的に生成して作業を継続してください）
 - タスク完了:     {{"type": "bot", "message": "完了メッセージ"}}
 
 ## cmd のルール（必須）
