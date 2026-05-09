@@ -32,6 +32,9 @@ pub enum AiCommand {
     ReadFile {
         path: String,
     },
+    ListDir {
+        path: String,
+    },
     Patch {
         path: String,
         diff: String,

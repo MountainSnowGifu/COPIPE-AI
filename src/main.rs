@@ -24,14 +24,28 @@ fn build_system_prompt(root: &std::path::Path) -> String {
 
 【重要】必ずJSONのコードブロック（```json\n...\n```）で応答してください。
 複数コマンドは配列にしてください。
+JSONの後に文章を続けてはいけません。
 
-使えるツール:
-- ファイル読み込み: {{"type": "read_file", "path": "相対パス"}}
+## 使えるツール
+
+- ファイル読み込み: {{"type": "read_file", "path": "相対パス"}}（1ターンに1ファイルのみ、複数ファイルは1つずつ別々に読む）
+- ディレクトリ一覧: {{"type": "list_dir", "path": "相対パス"}}
 - ファイル書き込み: {{"type": "file", "path": "相対パス", "content": "内容"}}
 - ディレクトリ作成: {{"type": "mkdir", "path": "相対パス"}}
 - ファイル削除:   {{"type": "delete_file", "path": "相対パス"}}
-- ユーザーへ表示: {{"type": "txt", "content": "メッセージ"}}
+- コマンド実行:   {{"type": "cmd", "name": "説明", "cmd": ["cargo", "build"], "workdir": "相対パス", "timeout": 30}}
+- ユーザーへ表示: {{"type": "txt", "content": "日本語のメッセージ"}}
 - タスク完了:     {{"type": "bot", "message": "完了メッセージ"}}
+
+## cmd のルール（必須）
+
+cmd を使う場合、必ず timeout を指定してください。timeout が無い cmd は生成してはいけません。
+以下のコマンドは禁止です: rm / shutdown / reboot / curl / wget / apt / apt-get
+
+## 安全ルール
+
+- ../ を含むパスは禁止
+- / で始まる絶対パスは禁止
 
 ツール実行結果は「[ツール実行結果]」として返ってきます。
 全てのタスクが完了したら必ず {{"type": "bot", "message": "..."}} で終えてください。"#,
@@ -43,11 +57,16 @@ fn build_system_prompt(root: &std::path::Path) -> String {
 
 async fn get_ws_url(port: u16) -> anyhow::Result<String> {
     let url = format!("http://127.0.0.1:{port}/json/version");
-    for _ in 0..30 {
+    eprintln!("CDP 接続を待機中 (最大15秒)...");
+    for i in 0..30 {
         tokio::time::sleep(Duration::from_millis(500)).await;
+        if i > 0 && i % 6 == 0 {
+            eprintln!("  CDP 待機中... ({}秒経過)", i / 2);
+        }
         if let Ok(resp) = reqwest::get(&url).await {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(ws) = json["webSocketDebuggerUrl"].as_str() {
+                    eprintln!("CDP 接続完了。");
                     return Ok(ws.to_string());
                 }
             }
@@ -62,12 +81,19 @@ async fn wait_for_element(
     timeout_secs: u64,
 ) -> anyhow::Result<chromiumoxide::element::Element> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let start = tokio::time::Instant::now();
+    let mut last_report = 0u64;
     loop {
         match page.find_element(selector).await {
             Ok(el) => return Ok(el),
             Err(_) => {
                 if tokio::time::Instant::now() >= deadline {
                     anyhow::bail!("タイムアウト: セレクター '{selector}' が見つかりません");
+                }
+                let elapsed = start.elapsed().as_secs();
+                if elapsed >= last_report + 5 && elapsed > 0 {
+                    eprintln!("  要素待機中... ({}秒経過)", elapsed);
+                    last_report = elapsed;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
@@ -91,12 +117,13 @@ async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<chromiumoxide
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})",
     ))
     .await?;
-    eprintln!("Loading Copilot...");
+    eprintln!("Copilot ページを開いています...");
     page.goto("https://copilot.microsoft.com").await?;
+    eprintln!("ページ初期化を待機中 (5秒)...");
     tokio::time::sleep(Duration::from_secs(5)).await;
-    eprintln!("Waiting for input...");
+    eprintln!("入力欄を待機中 (最大20秒)...");
     wait_for_element(&page, "#userInput", 20).await?;
-    eprintln!("Ready.");
+    eprintln!("入力欄を検出しました。");
     Ok(page)
 }
 
@@ -182,6 +209,37 @@ async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<St
         .collect()
 }
 
+// ─── プロンプト分割 ───────────────────────────────────────────────────────────
+
+const PROMPT_CHUNK_SIZE: usize = 10_000;
+
+fn split_prompt(text: &str) -> Vec<String> {
+    if text.len() <= PROMPT_CHUNK_SIZE {
+        return vec![text.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        if text.len() - start <= PROMPT_CHUNK_SIZE {
+            chunks.push(text[start..].to_string());
+            break;
+        }
+        let mut end = start + PROMPT_CHUNK_SIZE;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let slice = &text[start..end];
+        let offset = slice
+            .rfind("\n\n")
+            .map(|p| p + 2)
+            .or_else(|| slice.rfind('\n').map(|p| p + 1))
+            .unwrap_or(end - start);
+        chunks.push(text[start..start + offset].to_string());
+        start += offset;
+    }
+    chunks
+}
+
 // ─── CopilotSession ──────────────────────────────────────────────────────────
 
 struct CopilotSession {
@@ -200,8 +258,10 @@ impl Drop for CopilotSession {
 
 impl CopilotSession {
     async fn start() -> anyhow::Result<Self> {
+        eprintln!("ブラウザを起動中...");
         let port = free_port();
         let mut edge = launch_edge(port)?;
+        eprintln!("ブラウザプロセス起動完了 (port {port})。");
         let result = Self::init(port, &mut edge).await;
         match result {
             Ok((page, handle)) => Ok(Self { page, edge, handle }),
@@ -218,11 +278,13 @@ impl CopilotSession {
         edge: &mut Child,
     ) -> anyhow::Result<(chromiumoxide::Page, tokio::task::JoinHandle<()>)> {
         let ws_url = get_ws_url(port).await?;
+        eprintln!("WebSocket に接続中...");
         let (browser, mut handler) = Browser::connect(&ws_url).await?;
+        eprintln!("ブラウザ接続完了。");
         let handle = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
                 if let Err(e) = h {
-                    eprintln!("Handler: {e}");
+                    eprintln!("ハンドラエラー: {e}");
                     break;
                 }
             }
@@ -238,6 +300,24 @@ impl CopilotSession {
     }
 
     async fn send_raw(&mut self, prompt: &str) -> anyhow::Result<()> {
+        let chunks = split_prompt(prompt);
+        let total = chunks.len();
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let part = i + 1;
+            let msg = if total == 1 {
+                chunk
+            } else if part < total {
+                format!("（{part}/{total}）続きがあります。JSON応答はまだ不要です。\n{chunk}")
+            } else {
+                format!("（{part}/{total}）全データ送信完了。以降の処理を続けてください。\n{chunk}")
+            };
+            eprintln!("プロンプト送信 ({part}/{total}, {}文字)", msg.len());
+            self.send_raw_single(&msg).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_raw_single(&mut self, prompt: &str) -> anyhow::Result<()> {
         let page = &self.page;
         let baseline = ai_message_count(page).await?;
 
@@ -289,14 +369,14 @@ async fn wait_for_ai_message_count(
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-    eprintln!("Waiting for response...");
+    eprintln!("応答を待機中...");
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if ai_message_count(page).await.unwrap_or(0) >= n {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("Timed out waiting for response");
+            anyhow::bail!("応答の開始がタイムアウトしました");
         }
     }
 }
@@ -316,12 +396,12 @@ async fn wait_for_stable_text(
 
         if !text.is_empty() && text == last {
             stable += 1;
-            eprintln!("Stable {stable}/5 ({} chars)", text.len());
+            eprintln!("安定 {stable}/5 ({} 文字)", text.len());
             if stable >= 5 {
                 return Ok(text);
             }
         } else if !text.is_empty() {
-            eprintln!("Generating... ({} chars)", text.len());
+            eprintln!("生成中... ({} 文字)", text.len());
             stable = 0;
             last = text;
         }
@@ -330,7 +410,7 @@ async fn wait_for_stable_text(
             if !last.is_empty() {
                 return Ok(last);
             }
-            anyhow::bail!("Timed out waiting for response text");
+            anyhow::bail!("応答テキストの取得がタイムアウトしました");
         }
     }
 }
@@ -375,14 +455,35 @@ async fn get_commands(
 
 const MAX_TURNS: u32 = 20;
 
+fn summarize_for_display(label: &str, output: &str) -> String {
+    if output.starts_with("```") {
+        let n = output.lines().count().saturating_sub(2);
+        return format!("{n}行");
+    }
+    if label.starts_with("ListDir(") {
+        let n = output.lines().filter(|l| !l.is_empty()).count();
+        return format!("{n}エントリ");
+    }
+    let first = output.lines().next().unwrap_or("").trim();
+    if first.len() > 120 {
+        format!("{}…", &first[..120])
+    } else {
+        first.to_string()
+    }
+}
+
 async fn run_agent(
     session: &mut CopilotSession,
     root: &std::path::Path,
     user_task: &str,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let mut prompt = user_task.to_string();
+    let mut read_files = std::collections::HashSet::new();
+    let mut done_log: Vec<String> = Vec::new();
 
     for turn in 0..MAX_TURNS {
+        eprintln!("[ターン {}/{}]", turn + 1, MAX_TURNS);
         let (commands, parse_errors) = get_commands(session, &prompt).await?;
 
         // パースエラーを ToolResult として積む
@@ -395,11 +496,18 @@ async fn run_agent(
             .collect();
 
         if commands.is_empty() && tool_results.is_empty() {
-            eprintln!("コマンドが取得できませんでした");
+            println!("コマンドが取得できませんでした");
             break;
         }
 
-        let (exec_results, messages) = execute(root, &commands);
+        let (exec_results, messages) = execute(root, &commands, &mut read_files).await;
+        for r in &exec_results {
+            if r.output.starts_with("ERROR:") {
+                done_log.push(format!("✗ {} → {}", r.label, r.output[6..].trim()));
+            } else {
+                done_log.push(format!("✓ {}", r.label));
+            }
+        }
         tool_results.extend(exec_results);
 
         for msg in &messages {
@@ -411,11 +519,24 @@ async fn run_agent(
         }
 
         for r in &tool_results {
-            println!("[{}] {}", r.label, r.output);
+            if r.output.starts_with("ERROR:") {
+                println!("[{}] {}", r.label, r.output);
+            } else if verbose {
+                println!("[{}] {}", r.label, r.output);
+            } else {
+                eprintln!("[{}] {}", r.label, summarize_for_display(&r.label, &r.output));
+            }
         }
 
         if turn + 1 == MAX_TURNS {
-            eprintln!("最大ターン数 ({MAX_TURNS}) に達しました。タスクを中断します。");
+            println!("最大ターン数 ({MAX_TURNS}) に達しました。");
+            if !done_log.is_empty() {
+                println!("\n── 実行サマリー ────────────────────────────────────");
+                for item in &done_log {
+                    println!("  {item}");
+                }
+                println!("────────────────────────────────────────────────────");
+            }
             break;
         }
 
@@ -429,11 +550,14 @@ async fn run_agent(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use std::io::{self, BufRead, Write};
+    use rustyline::error::ReadlineError;
 
-    // CLI 引数でプロジェクトディレクトリを受け取る（省略時はカレントディレクトリ）
-    let root_arg = std::env::args().nth(1);
-    let root = match root_arg {
+    // CLI 引数パース: copipe-ai [--verbose|-v] [プロジェクトディレクトリ]
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let root_dir = args.iter().find(|a| !a.starts_with('-')).cloned();
+
+    let root = match root_dir {
         Some(ref p) => std::path::PathBuf::from(p),
         None => std::env::current_dir()?,
     }
@@ -444,31 +568,62 @@ async fn main() -> anyhow::Result<()> {
     let mut session = CopilotSession::start().await?;
     eprintln!("Copilot に接続しました。");
 
-    eprintln!("システムプロンプト送信中...");
+    eprintln!("システムプロンプト送信中 (最大90秒かかることがあります)...");
     session.send_raw(&build_system_prompt(&root)).await?;
     eprintln!("準備完了。");
 
     println!(
-        "ToyClaudeCode へようこそ。[{}] のタスクを入力してください（終了: exit）",
+        "ToyClaudeCode へようこそ。[{}] のタスクを入力してください（終了: Ctrl+D または exit）",
         root.display()
     );
+    println!("ヒント: 行末に \\ を付けると次の行に続けられます。タスク実行中は Ctrl+C でキャンセルできます。");
 
-    let stdin = io::stdin();
-    loop {
-        print!("\n> ");
-        io::stdout().flush()?;
+    let mut rl = rustyline::DefaultEditor::new()?;
+    let history_path = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".copipe_ai_history"));
+    if let Some(ref p) = history_path {
+        rl.load_history(p).ok();
+    }
 
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("入力エラー: {e}");
-                break;
+    'repl: loop {
+        // ── 入力フェーズ（行末 \ でマルチライン継続） ──────────────────
+        let mut task = String::new();
+        loop {
+            let prompt = if task.is_empty() { "\n> " } else { "... " };
+            match rl.readline(prompt) {
+                Ok(line) => {
+                    rl.add_history_entry(line.as_str()).ok();
+                    if line.ends_with('\\') {
+                        task.push_str(&line[..line.len() - 1]);
+                        task.push('\n');
+                    } else {
+                        task.push_str(&line);
+                        break;
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl+C: 入力中ならクリア、空なら案内
+                    if task.is_empty() {
+                        println!("(Ctrl+D で終了)");
+                    } else {
+                        task.clear();
+                        println!("入力をクリアしました");
+                    }
+                    continue 'repl;
+                }
+                Err(ReadlineError::Eof) => {
+                    // Ctrl+D: 終了
+                    break 'repl;
+                }
+                Err(e) => {
+                    eprintln!("入力エラー: {e}");
+                    break 'repl;
+                }
             }
         }
 
-        let task = line.trim();
+        let task = task.trim().to_string();
         if task.is_empty() {
             continue;
         }
@@ -476,11 +631,45 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        if let Err(e) = run_agent(&mut session, &root, task).await {
-            eprintln!("エラー: {e}");
+        // ── 確認ステップ ──────────────────────────────────────────────
+        println!("┌─ タスク ─────────────────────────────────────────");
+        for line in task.lines() {
+            println!("│ {line}");
+        }
+        println!("└──────────────────────────────────────────────────");
+        match rl.readline("実行しますか? [Y/n] ") {
+            Ok(ans) if ans.trim().eq_ignore_ascii_case("n") => {
+                println!("キャンセルしました");
+                continue 'repl;
+            }
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                println!("キャンセルしました");
+                continue 'repl;
+            }
+            Err(e) => {
+                eprintln!("入力エラー: {e}");
+                break 'repl;
+            }
+            Ok(_) => {}
+        }
+
+        // ── 実行フェーズ（Ctrl+C でキャンセル） ───────────────────────
+        tokio::select! {
+            result = run_agent(&mut session, &root, &task, verbose) => {
+                match result {
+                    Ok(()) => println!("\n── タスク完了 ─────────────────────────────────────────"),
+                    Err(e) => eprintln!("エラー: {e}"),
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nCtrl+C: タスクをキャンセルしました");
+            }
         }
     }
 
+    if let Some(ref p) = history_path {
+        rl.save_history(p).ok();
+    }
     println!("終了します");
     drop(session);
     Ok(())
