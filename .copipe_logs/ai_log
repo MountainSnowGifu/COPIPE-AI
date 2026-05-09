@@ -16,3 +16,25 @@
 === ターン 4 ===
 {"type":"txt","content":"ai_log はシステム管理領域であり、内容をクリアする操作は実行できません。"}
 ---
+=== ターン 1 ===
+---
+=== ターン 1 ===
+---
+=== ターン 1 ===
+{"type":"list_dir","path":"src"}
+---
+=== ターン 2 ===
+{"type":"read_file","path":"src/main.rs"}
+---
+=== ターン 3 ===
+{"type":"list_dir","path":"src/session"}
+---
+=== ターン 4 ===
+{"type":"read_file","path":"src/session/mod.rs"}
+---
+=== ターン 5 ===
+{"type":"list_dir","path":"src/agent"}
+---
+=== ターン 6 ===
+{"type":"read_file","path":"src/agent/mod.rs"}
+---

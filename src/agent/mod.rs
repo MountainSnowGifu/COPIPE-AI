@@ -61,9 +61,10 @@ async fn get_commands(
 
     if blocks.is_empty() {
         eprintln!("JSON ブロックなし → 再要求します");
-        session
-            .send_raw("JSON コードブロックで回答してください。")
-            .await?;
+        session.send_raw(
+            "次の作業ステップを JSON スキーマ形式で記述してください。\
+            例：\n```json\n{\"type\": \"list_dir\", \"path\": \".\"}\n```"
+        ).await?;
         let n2 = ai_message_count(&session.page).await?;
         let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
         return Ok(parse_blocks(&blocks2));
