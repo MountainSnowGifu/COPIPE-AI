@@ -236,10 +236,14 @@ pub(crate) async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize
     if raw.is_empty() {
         return vec![];
     }
+    // JSON らしいブロック（{ or [ 始まり）をすべて返す。
+    // 構文エラーのある JSON も parse_blocks に渡して詳細なエラーを出させる。
     raw.split('\x00')
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|s| serde_json::from_str::<serde_json::Value>(s).is_ok())
+        .filter(|s| {
+            let t = s.trim_start();
+            t.starts_with('{') || t.starts_with('[')
+        })
         .collect()
 }
 

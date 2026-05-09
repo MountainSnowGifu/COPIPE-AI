@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
 
     // CLI 引数パース: copipe-ai [--verbose|-v] [プロジェクトディレクトリ]
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let mut verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let root_dir = args.iter().find(|a| !a.starts_with('-')).cloned();
 
     let root = match root_dir {
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("準備完了。");
 
     println!("{BOLD}╔══════════════════════════════════════════════════╗{RESET}");
-    println!("{BOLD}║          ToyClaudeCode へようこそ                ║{RESET}");
+    println!("{BOLD}║             COPIPE-AI へようこそ                 ║{RESET}");
     println!("{BOLD}╚══════════════════════════════════════════════════╝{RESET}");
     println!("プロジェクト: {BOLD}{}{RESET}", root.display());
     println!();
@@ -43,9 +43,7 @@ async fn main() -> anyhow::Result<()> {
     println!("  行末に \\ を付けると次の行に続けられます");
     println!("  タスク実行中は {BOLD}Ctrl+C{RESET} でキャンセル");
     println!("  終了: {BOLD}exit{RESET} / {BOLD}quit{RESET} / {BOLD}Ctrl+D{RESET}");
-    println!();
-    println!("{BOLD}オプション{RESET}");
-    println!("  {BOLD}--verbose{RESET}  ツール実行結果を全文表示します");
+    println!("  verbose 切替: {BOLD}:v{RESET}  (現在: {})", if verbose { "on" } else { "off" });
     println!();
     println!("{DIM}タスク例:{RESET}");
     println!("{DIM}  src ディレクトリの構成を調べてください{RESET}");
@@ -100,6 +98,11 @@ async fn main() -> anyhow::Result<()> {
         if task == "exit" || task == "quit" {
             break;
         }
+        if task == ":v" || task == "verbose" {
+            verbose = !verbose;
+            println!("verbose: {}", if verbose { "on" } else { "off" });
+            continue 'repl;
+        }
 
         // ── 確認ステップ ──────────────────────────────────────────────
         println!("┌─ タスク ─────────────────────────────────────────");
@@ -109,10 +112,10 @@ async fn main() -> anyhow::Result<()> {
         println!("└──────────────────────────────────────────────────");
         // y / Y / Enter のみ実行。それ以外は再入力を促す。
         let confirmed = 'confirm: loop {
-            match rl.readline("実行しますか? [y/N] ") {
+            match rl.readline("実行しますか? [Y/n] ") {
                 Ok(ans) => match ans.trim() {
                     "" | "y" | "Y" => break 'confirm Some(true),
-                    "n" | "N" => break 'confirm Some(false),
+                    "n" | "N"      => break 'confirm Some(false),
                     other => println!("「{other}」は無効です。y か n を半角英字で入力してください"),
                 },
                 Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
@@ -138,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
             result = run_agent(&mut session, &root, &task, verbose) => {
                 match result {
                     Ok(()) => println!("\n── タスク完了 ─────────────────────────────────────────"),
-                    Err(e) => eprintln!("エラー: {e}"),
+                    Err(e) => println!("エラー: {e}"),
                 }
             }
             _ = tokio::signal::ctrl_c() => {

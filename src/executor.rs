@@ -76,26 +76,32 @@ fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
 // ─── コマンド安全チェック ─────────────────────────────────────────────────────
 
 /// 実行を許可するコマンド名（allowlist 方式）
+/// mv / cp / touch は file/patch/mkdir で代替できるため除外
 const ALLOWED_EXECUTABLES: &[&str] = &[
     // Rust toolchain
     "cargo", "rustc", "rustfmt",
-    // バージョン管理
+    // バージョン管理（読み取り系のみ。書き込み系は ALLOWED_GIT_SUBCMDS で制限）
     "git",
     // ファイル閲覧・検索（書き込みなし）
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
-    // テキスト処理
+    // テキスト処理（sed は -i を別途ブロック）
     "sort", "uniq", "tr", "cut", "awk", "sed", "jq",
     // ビルド
     "make",
-    // ファイル操作（プロジェクト内限定、引数チェックで保護）
-    "cp", "mv", "touch",
     // 情報表示
     "echo", "printf", "date", "env",
 ];
 
-/// (コマンド名, ブロックするサブコマンド/フラグ) — データ破壊や任意実行に繋がるもの
-const BLOCKED_SUBCMDS: &[(&str, &[&str])] = &[
-    ("git",  &["clean", "push", "force-push"]),
+/// git で許可する読み取り系サブコマンド（それ以外はすべて拒否）
+const ALLOWED_GIT_SUBCMDS: &[&str] = &[
+    "log", "status", "diff", "show", "blame", "ls-files",
+    "describe", "branch", "tag", "grep", "rev-parse", "cat-file",
+    "shortlog", "reflog",
+];
+
+/// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
+const BLOCKED_ARGS: &[(&str, &[&str])] = &[
+    ("sed",  &["-i", "--in-place"]),
     ("find", &["-delete", "-exec", "-execdir"]),
 ];
 
@@ -129,8 +135,19 @@ fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
         }
     }
 
-    // コマンド固有の危険サブコマンド/フラグを拒否
-    for (target, blocked) in BLOCKED_SUBCMDS {
+    // git は読み取り系サブコマンドのみ許可
+    if basename == "git" {
+        let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
+        if !ALLOWED_GIT_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "アクセス拒否: 'git {subcmd}' は許可されていません。許可サブコマンド: {}",
+                ALLOWED_GIT_SUBCMDS.join(", ")
+            ));
+        }
+    }
+
+    // コマンド固有の危険フラグを拒否
+    for (target, blocked) in BLOCKED_ARGS {
         if basename == *target {
             for arg in &cmd[1..] {
                 if blocked.contains(&arg.as_str()) {
@@ -384,10 +401,21 @@ pub async fn execute(
             AiCommand::DeleteFile { path } => {
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
-                    Ok(abs) => match std::fs::remove_file(&abs) {
-                        Ok(_) => "OK".to_string(),
-                        Err(e) => format!("ERROR: {e}"),
-                    },
+                    Ok(abs) => {
+                        if abs.exists() && !read_files.contains(&abs) {
+                            format!(
+                                "ERROR: '{path}' は未読です。先に read_file で内容を確認してから削除してください。"
+                            )
+                        } else {
+                            match std::fs::remove_file(&abs) {
+                                Ok(_) => {
+                                    read_files.remove(&abs);
+                                    "OK".to_string()
+                                }
+                                Err(e) => format!("ERROR: {e}"),
+                            }
+                        }
+                    }
                 };
                 results.push(ToolResult {
                     label: format!("DeleteFile({path})"),
@@ -411,6 +439,7 @@ pub async fn execute(
                 }
             }
             AiCommand::Cmd { name, cmd, workdir, timeout: timeout_secs } => {
+                println!("[{}] {} 実行中...", name, cmd.join(" "));
                 let output = if *timeout_secs == 0 {
                     "ERROR: timeout は必須です。1以上の秒数を指定して再生成してください。"
                         .to_string()

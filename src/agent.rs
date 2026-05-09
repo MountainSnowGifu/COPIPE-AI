@@ -171,8 +171,12 @@ pub async fn run_agent(
             break;
         }
 
-        // Bot コマンドが含まれていたら完了とみなしてループを抜ける
-        let is_done = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }));
+        // bot + 実ツールが共存する場合はまだ完了とみなさない（コマンド結果をAIに返す必要がある）
+        let has_bot = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }));
+        let has_real_tools = commands.iter().any(|c| {
+            !matches!(c, AiCommand::Bot { .. } | AiCommand::Txt { .. })
+        });
+        let is_done = has_bot && !has_real_tools;
 
         // txt のみかどうか（実際のツール呼び出しがなければ続行を促す）
         let only_txt = !is_done
@@ -213,12 +217,13 @@ pub async fn run_agent(
             } else if verbose {
                 println!("[{}] {}", r.label, r.output);
             } else {
-                eprintln!("{DIM}[{}] {}{RESET}", r.label, summarize_for_display(&r.label, &r.output));
+                println!("{DIM}[{}] {}{RESET}", r.label, summarize_for_display(&r.label, &r.output));
             }
         }
 
         if turn + 1 == MAX_TURNS {
             println!("最大ターン数 ({MAX_TURNS}) に達しました。");
+            println!("{DIM}タスクを再入力すると続きから作業できます。{RESET}");
             reached_max = true;
             break;
         }
