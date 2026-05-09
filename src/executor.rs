@@ -463,9 +463,7 @@ pub async fn execute(
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => {
                         if !abs.exists() {
-                            format!("ERROR: '{path}' が存在しません。先に read_file で読み込んでください。")
-                        } else if !read_files.contains(&abs) {
-                            format!("ERROR: '{path}' は未読です。先に read_file で内容を確認してから patch を適用してください。")
+                            format!("ERROR: '{path}' が存在しません。patch はファイルが存在する場合のみ使用できます。")
                         } else {
                             match std::fs::read_to_string(&abs) {
                                 Err(e) => format!("ERROR: ファイル読み込み失敗: {e}"),
@@ -473,7 +471,11 @@ pub async fn execute(
                                     Err(e) => format!("ERROR: {e}"),
                                     Ok(patched) => match std::fs::write(&abs, &patched) {
                                         Err(e) => format!("ERROR: 書き込み失敗: {e}"),
-                                        Ok(_) => "OK".to_string(),
+                                        Ok(_) => {
+                                            // コンテキスト検証済みなので read_file と同等とみなす
+                                            read_files.insert(abs);
+                                            "OK".to_string()
+                                        }
                                     },
                                 },
                             }
