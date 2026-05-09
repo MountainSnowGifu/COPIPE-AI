@@ -138,6 +138,127 @@ fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+// ─── unified diff アプライア ──────────────────────────────────────────────────
+
+/// `@@ -old_start[,old_count] +new_start[,new_count] @@` をパースして
+/// (old_start_1indexed, old_line_count) を返す
+fn parse_hunk_header(line: &str) -> Result<(usize, usize), String> {
+    // @@ の内側を取り出す
+    let inner = line
+        .trim_start_matches('@')
+        .split("@@")
+        .next()
+        .unwrap_or("")
+        .trim();
+
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    if parts.len() < 2 || !parts[0].starts_with('-') {
+        return Err(format!("不正なハンクヘッダー: `{line}`"));
+    }
+
+    let old_spec = &parts[0][1..]; // '-' を除く
+    let (start, count) = if let Some((s, c)) = old_spec.split_once(',') {
+        let s: usize = s.parse().map_err(|_| format!("行番号解析エラー: `{s}`"))?;
+        let c: usize = c.parse().map_err(|_| format!("行数解析エラー: `{c}`"))?;
+        (s, c)
+    } else {
+        let s: usize = old_spec.parse().map_err(|_| format!("行番号解析エラー: `{old_spec}`"))?;
+        (s, 1)
+    };
+
+    Ok((start, count))
+}
+
+/// 標準 unified diff を `content` に適用して新しい文字列を返す
+///
+/// diff 形式:
+///   `@@ -old_start,old_count +new_start,new_count @@`
+///   ` ` 始まり → コンテキスト行（変更なし）
+///   `-` 始まり → 削除行
+///   `+` 始まり → 追加行
+fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
+    // 末尾改行を保持しつつ行ベクタに展開
+    let trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
+    if trailing_newline {
+        lines.pop(); // split が生む末尾の空要素を除く
+    }
+
+    let diff_lines: Vec<&str> = diff.lines().collect();
+    let mut di = 0usize;
+    let mut offset: i64 = 0; // 適用済みハンクによる行番号ずれ
+
+    while di < diff_lines.len() {
+        let dl = diff_lines[di];
+        if !dl.starts_with("@@") {
+            di += 1;
+            continue;
+        }
+
+        let (old_start, _) = parse_hunk_header(dl)?;
+        di += 1;
+
+        // ハンク行を収集（次の @@ または末尾まで）
+        let mut hunk: Vec<(char, String)> = Vec::new();
+        while di < diff_lines.len() && !diff_lines[di].starts_with("@@") {
+            let hl = diff_lines[di];
+            let marker = hl.chars().next().unwrap_or(' ');
+            let body = if hl.len() > 1 { hl[1..].to_string() } else { String::new() };
+            if matches!(marker, ' ' | '-' | '+') {
+                hunk.push((marker, body));
+            }
+            di += 1;
+        }
+
+        // 適用開始位置（0-indexed、累積 offset で補正）
+        let apply_at = (old_start as i64 - 1 + offset).max(0) as usize;
+
+        // 削除/コンテキスト行の総数
+        let old_count = hunk.iter().filter(|(m, _)| matches!(m, ' ' | '-')).count();
+
+        if apply_at + old_count > lines.len() {
+            return Err(format!(
+                "パッチ適用失敗: 行 {apply_at}+1 から {old_count} 行を置換できません（ファイルは {} 行）",
+                lines.len()
+            ));
+        }
+
+        // コンテキスト行の一致を検証
+        let mut old_idx = apply_at;
+        for (marker, expected) in &hunk {
+            if matches!(marker, ' ' | '-') {
+                if lines.get(old_idx).map(|s| s.as_str()) != Some(expected.as_str()) {
+                    return Err(format!(
+                        "パッチ適用失敗: 行 {} のコンテキストが一致しません\n  期待: {:?}\n  実際: {:?}",
+                        old_idx + 1,
+                        expected,
+                        lines.get(old_idx).map(|s| s.as_str()).unwrap_or("<ファイル終端>")
+                    ));
+                }
+                old_idx += 1;
+            }
+        }
+
+        // コンテキスト + 追加行で置換
+        let new_lines: Vec<String> = hunk
+            .iter()
+            .filter(|(m, _)| matches!(m, ' ' | '+'))
+            .map(|(_, c)| c.clone())
+            .collect();
+
+        let added   = hunk.iter().filter(|(m, _)| *m == '+').count() as i64;
+        let removed = hunk.iter().filter(|(m, _)| *m == '-').count() as i64;
+        lines.splice(apply_at..apply_at + old_count, new_lines);
+        offset += added - removed;
+    }
+
+    let mut result = lines.join("\n");
+    if trailing_newline {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
 // ─── executor ────────────────────────────────────────────────────────────────
 
 /// コマンドを実行し、(ツール結果, 表示メッセージ) を返す
@@ -337,10 +458,31 @@ pub async fn execute(
                     output,
                 });
             }
-            AiCommand::Patch { path, .. } => {
+            AiCommand::Patch { path, diff } => {
+                let output = match resolve(root, path) {
+                    Err(e) => format!("ERROR: {e}"),
+                    Ok(abs) => {
+                        if !abs.exists() {
+                            format!("ERROR: '{path}' が存在しません。先に read_file で読み込んでください。")
+                        } else if !read_files.contains(&abs) {
+                            format!("ERROR: '{path}' は未読です。先に read_file で内容を確認してから patch を適用してください。")
+                        } else {
+                            match std::fs::read_to_string(&abs) {
+                                Err(e) => format!("ERROR: ファイル読み込み失敗: {e}"),
+                                Ok(content) => match apply_unified_diff(&content, diff) {
+                                    Err(e) => format!("ERROR: {e}"),
+                                    Ok(patched) => match std::fs::write(&abs, &patched) {
+                                        Err(e) => format!("ERROR: 書き込み失敗: {e}"),
+                                        Ok(_) => "OK".to_string(),
+                                    },
+                                },
+                            }
+                        }
+                    }
+                };
                 results.push(ToolResult {
                     label: format!("Patch({path})"),
-                    output: "ERROR: Patch は未実装です。read_file で読んだ後、file コマンドで全文を書き直してください。".to_string(),
+                    output,
                 });
             }
             AiCommand::ReadLog { filename } => {
