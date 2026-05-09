@@ -209,6 +209,11 @@ fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
         let mut hunk: Vec<(char, String)> = Vec::new();
         while di < diff_lines.len() && !diff_lines[di].starts_with("@@") {
             let hl = diff_lines[di];
+            // 空行は末尾の \n によるアーティファクトなのでスキップ
+            if hl.is_empty() {
+                di += 1;
+                continue;
+            }
             let marker = hl.chars().next().unwrap_or(' ');
             let body = if hl.len() > 1 { hl[1..].to_string() } else { String::new() };
             if matches!(marker, ' ' | '-' | '+') {
@@ -230,16 +235,19 @@ fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
             ));
         }
 
-        // コンテキスト行の一致を検証
+        // コンテキスト行の一致を検証（末尾スペース差異は許容）
         let mut old_idx = apply_at;
         for (marker, expected) in &hunk {
             if matches!(marker, ' ' | '-') {
-                if lines.get(old_idx).map(|s| s.as_str()) != Some(expected.as_str()) {
+                let actual = lines.get(old_idx).map(|s| s.as_str()).unwrap_or("<ファイル終端>");
+                let matches = actual == expected.as_str()
+                    || actual.trim_end() == expected.trim_end();
+                if !matches {
                     return Err(format!(
                         "パッチ適用失敗: 行 {} のコンテキストが一致しません\n  期待: {:?}\n  実際: {:?}",
                         old_idx + 1,
                         expected,
-                        lines.get(old_idx).map(|s| s.as_str()).unwrap_or("<ファイル終端>")
+                        actual
                     ));
                 }
                 old_idx += 1;
