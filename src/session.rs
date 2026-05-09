@@ -215,10 +215,7 @@ async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> String {
     extract_ai_text(&raw)
 }
 
-pub(crate) async fn get_codeblocks_from_dom(
-    page: &chromiumoxide::Page,
-    n: usize,
-) -> Vec<String> {
+pub(crate) async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
     let raw = page
         .evaluate_expression(&format!(
             r#"

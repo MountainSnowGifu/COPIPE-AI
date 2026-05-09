@@ -168,6 +168,11 @@ pub async fn run_agent(
         // Bot コマンドが含まれていたら完了とみなしてループを抜ける
         let is_done = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }));
 
+        // txt のみかどうか（実際のツール呼び出しがなければ続行を促す）
+        let only_txt = !is_done
+            && tool_results.is_empty()
+            && commands.iter().all(|c| matches!(c, AiCommand::Txt { .. }));
+
         let (exec_results, messages) = execute(root, &commands, &mut read_files).await;
         for r in &exec_results {
             if r.output.starts_with("ERROR:") {
@@ -182,7 +187,17 @@ pub async fn run_agent(
             println!("\n{CYAN_BOLD}[AI]{RESET} {msg}");
         }
 
-        if tool_results.is_empty() || is_done {
+        if is_done {
+            break;
+        }
+
+        if only_txt {
+            // txt のみで止まっている → ツールを使って作業を続けるよう促す
+            prompt = "ツールを使って作業を続けてください。ユーザーへの確認は不要です。".to_string();
+            continue;
+        }
+
+        if tool_results.is_empty() {
             break;
         }
 
