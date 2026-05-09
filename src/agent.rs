@@ -171,6 +171,7 @@ pub async fn run_agent(
 ) -> anyhow::Result<()> {
     let mut prompt = user_task.to_string();
     let mut read_files = std::collections::HashSet::new();
+    let mut listed_dirs: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     let mut done_log: Vec<String> = Vec::new();
     let mut reached_max = false;
 
@@ -223,7 +224,7 @@ pub async fn run_agent(
             && tool_results.is_empty()
             && commands.iter().all(|c| matches!(c, AiCommand::Txt { .. }));
 
-        let (exec_results, messages) = execute(root, &commands, &mut read_files).await;
+        let (exec_results, messages) = execute(root, &commands, &mut read_files, &mut listed_dirs).await;
         for r in &exec_results {
             if r.output.starts_with("ERROR:") {
                 done_log.push(format!("✗ {} → {}", r.label, r.output[6..].trim()));

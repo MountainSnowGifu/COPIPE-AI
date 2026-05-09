@@ -294,11 +294,13 @@ fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
 // ─── executor ────────────────────────────────────────────────────────────────
 
 /// コマンドを実行し、(ツール結果, 表示メッセージ) を返す
-/// `read_files` はセッション内で読み込んだファイルを追跡する（ファイル上書きガード用）
+/// `read_files` はセッション内で読み込んだファイルを追跡する（再読み防止・ファイル上書きガード用）
+/// `listed_dirs` はセッション内でリスト済みのディレクトリを追跡する（再リスト防止用）
 pub async fn execute(
     root: &Path,
     commands: &[AiCommand],
     read_files: &mut HashSet<PathBuf>,
+    listed_dirs: &mut HashSet<PathBuf>,
 ) -> (Vec<ToolResult>, Vec<String>) {
     let mut results = Vec::new();
     let mut messages = Vec::new();
@@ -317,13 +319,20 @@ pub async fn execute(
                 read_file_done = true;
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
-                    Ok(abs) => match std::fs::read_to_string(&abs) {
-                        Ok(content) => {
-                            read_files.insert(abs);
-                            format!("```\n{content}\n```")
+                    Ok(abs) => {
+                        if read_files.contains(&abs) {
+                            // 既読ファイルは再読しない
+                            "既に読み込み済みです。内容はすでにコンテキストにあります。再読は不要です。次のアクションに進んでください。".to_string()
+                        } else {
+                            match std::fs::read_to_string(&abs) {
+                                Ok(content) => {
+                                    read_files.insert(abs);
+                                    format!("```\n{content}\n```")
+                                }
+                                Err(e) => format!("ERROR: {e}"),
+                            }
                         }
-                        Err(e) => format!("ERROR: {e}"),
-                    },
+                    }
                 };
                 results.push(ToolResult {
                     label: format!("ReadFile({path})"),
@@ -333,24 +342,32 @@ pub async fn execute(
             AiCommand::ListDir { path } => {
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
-                    Ok(abs) => match std::fs::read_dir(&abs) {
-                        Err(e) => format!("ERROR: {e}"),
-                        Ok(entries) => {
-                            let mut lines: Vec<String> = entries
-                                .filter_map(|e| e.ok())
-                                .map(|e| {
-                                    let name = e.file_name().to_string_lossy().into_owned();
-                                    if e.path().is_dir() {
-                                        format!("{name}/")
-                                    } else {
-                                        name
-                                    }
-                                })
-                                .collect();
-                            lines.sort();
-                            lines.join("\n")
+                    Ok(abs) => {
+                        if listed_dirs.contains(&abs) {
+                            // 既にリスト済みのディレクトリは再リストしない
+                            format!("既にリスト済みです。内容はすでにコンテキストにあります。再リストは不要です。次のアクションに進んでください。")
+                        } else {
+                            match std::fs::read_dir(&abs) {
+                                Err(e) => format!("ERROR: {e}"),
+                                Ok(entries) => {
+                                    listed_dirs.insert(abs);
+                                    let mut lines: Vec<String> = entries
+                                        .filter_map(|e| e.ok())
+                                        .map(|e| {
+                                            let name = e.file_name().to_string_lossy().into_owned();
+                                            if e.path().is_dir() {
+                                                format!("{name}/")
+                                            } else {
+                                                name
+                                            }
+                                        })
+                                        .collect();
+                                    lines.sort();
+                                    lines.join("\n")
+                                }
+                            }
                         }
-                    },
+                    }
                 };
                 results.push(ToolResult {
                     label: format!("ListDir({path})"),
