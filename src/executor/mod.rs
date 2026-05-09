@@ -140,7 +140,7 @@ pub async fn execute(
     let mut messages = Vec::new();
     // 1ターンあたりの read_file 合計文字数上限
     // 複数の小ファイルは1ターンで読める・大きいファイルは1ファイルでも制限に当たる
-    const MAX_TURN_READ_CHARS: usize = 7_000;
+    const MAX_TURN_READ_CHARS: usize = 10_000;
     let mut turn_read_chars = 0usize;
 
     for cmd in commands {
@@ -173,9 +173,8 @@ pub async fn execute(
                             format!("ERROR: ファイルが存在しません: '{path}'.{hint}")
                         }
                         Ok(content) => {
-                            read_files.insert(abs);
                             // ターン内残バジェットを考慮した上限（ファイル個別上限も兼ねる）
-                            let budget = MAX_TURN_READ_CHARS.saturating_sub(turn_read_chars).min(8_000);
+                            let budget = MAX_TURN_READ_CHARS.saturating_sub(turn_read_chars);
                             let total_lines = content.lines().count();
                             let sliced: String = if *offset_lines > 0 {
                                 content.lines().skip(*offset_lines).collect::<Vec<_>>().join("\n")
@@ -184,15 +183,20 @@ pub async fn execute(
                             };
                             let sliced_lines = total_lines.saturating_sub(*offset_lines);
                             let out = if sliced.chars().count() > budget {
+                                // 部分読み込み: read_files に追加しない（上書き・削除を防ぐ）
                                 let truncated: String = sliced.chars().take(budget).collect();
                                 let shown_lines = truncated.lines().count();
                                 let remaining = sliced_lines.saturating_sub(shown_lines);
                                 let next_offset = offset_lines + shown_lines;
                                 format!("```\n{truncated}\n```\n[残り {remaining} 行。続きは {{\"type\":\"read_file\",\"path\":\"{path}\",\"offset_lines\":{next_offset}}} で取得]")
-                            } else if *offset_lines > 0 {
-                                format!("```\n{sliced}\n```\n[{offset_lines} 行目以降を表示（全 {total_lines} 行）]")
                             } else {
-                                format!("```\n{sliced}\n```")
+                                // 全内容を読み切った場合のみ read_files に登録
+                                read_files.insert(abs);
+                                if *offset_lines > 0 {
+                                    format!("```\n{sliced}\n```\n[{offset_lines} 行目以降を表示（全 {total_lines} 行）]")
+                                } else {
+                                    format!("```\n{sliced}\n```")
+                                }
                             };
                             turn_read_chars += out.chars().count();
                             out
@@ -477,7 +481,7 @@ pub async fn execute(
 }
 
 pub fn format_tool_results(results: &[ToolResult]) -> String {
-    const MAX_TOTAL_CHARS: usize = 6_000;
+    const MAX_TOTAL_CHARS: usize = 10_000;
     let mut parts = vec!["[ツール実行結果]".to_string()];
     let mut used = parts[0].len();
     let total = results.len();

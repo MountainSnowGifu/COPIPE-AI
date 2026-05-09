@@ -269,9 +269,12 @@ impl CopilotSession {
                 .unwrap_or_default();
             // フォールバック詳細はログファイルのみ（端末には出さない）
             if let Some(ref ld) = self.log_dir {
-                use std::io::Write as IoWrite;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ld.join("browser_log")) {
-                    let _ = writeln!(f, "[送信フォールバック] {click_result}\n---");
+                let log_path = ld.join("browser_log");
+                if !log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                    use std::io::Write as IoWrite;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                        let _ = writeln!(f, "[送信フォールバック] {click_result}\n---");
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;

@@ -21,9 +21,10 @@ const ALLOWED_GIT_SUBCMDS: &[&str] = &[
     "shortlog", "reflog",
 ];
 
-/// cargo で許可するサブコマンド（コード実行を伴わないもの）
-/// run / test / bench / fix はビルドスクリプト・proc macro・テストバイナリ経由で
-/// 任意コードを実行できるため除外
+/// cargo で許可するサブコマンド
+/// 注意: build / check / clippy / doc も build.rs・proc macro・コンパイラプラグイン経由で
+/// 任意コードを実行し得る。untrusted リポジトリへの使用は本質的にリスクを伴う。
+/// run / test / bench / fix は加えてバイナリ・テストコードも実行するため除外。
 const ALLOWED_CARGO_SUBCMDS: &[&str] = &[
     "build", "check", "fmt", "clippy", "doc", "clean",
 ];

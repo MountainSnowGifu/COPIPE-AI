@@ -67,9 +67,12 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&log_dir).ok();
     for name in &["ai_log", "cmd_log", "browser_log"] {
         let log_path = log_dir.join(name);
+        // symlink ならスキップではなく起動を拒否（後続の追記で外部ファイルへ書けてしまうため）
         if log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-            eprintln!("警告: {} はシンボリックリンクのため初期化をスキップしました", log_path.display());
-            continue;
+            anyhow::bail!(
+                "{} はシンボリックリンクです。外部ファイルへのログ書き込みを防ぐため起動を中止します。",
+                log_path.display()
+            );
         }
         std::fs::write(&log_path, "").ok();
     }

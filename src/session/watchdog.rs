@@ -27,10 +27,14 @@ async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
 
 fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
     if let Some(dir) = log_dir {
+        let path = dir.join("browser_log");
+        if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            return;
+        }
         use std::io::Write as IoWrite;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true).append(true)
-            .open(dir.join("browser_log"))
+            .open(&path)
         {
             let _ = writeln!(f, "{msg}\n---");
         }
