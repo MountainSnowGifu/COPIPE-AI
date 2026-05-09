@@ -14,13 +14,40 @@ pub const LOG_DIR: &str = ".copipe_logs";
 
 const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly", "browser_log"];
 
-/// ログファイルへの安全な追記（symlink なら書き込まない）
+/// ログファイルへの安全な追記
+/// O_NOFOLLOW（Unix）を使ってチェックと open の間の TOCTOU を防ぐ。
+/// Windows では symlink_metadata チェックのみ（TOCTOU リスクは低い）。
 pub fn safe_append_log(path: &Path, content: &str) {
-    if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return; // symlink は無視
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW = 0o400000 (Linux) / O_NOFOLLOW = 0x100 (macOS)
+        // libc::O_NOFOLLOW を使わずに直接定数を指定
+        #[cfg(target_os = "linux")]
+        const O_NOFOLLOW: i32 = 0o400000;
+        #[cfg(target_os = "macos")]
+        const O_NOFOLLOW: i32 = 0x100;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        const O_NOFOLLOW: i32 = 0; // fallback: 効果なし
+
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path);
+        if let Ok(mut f) = result {
+            let _ = f.write_all(content.as_bytes());
+        }
+        // O_NOFOLLOW で ELOOP が返った場合は open が失敗するので書き込まれない
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = f.write_all(content.as_bytes());
+    #[cfg(not(unix))]
+    {
+        if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            return;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(content.as_bytes());
+        }
     }
 }
 
@@ -184,7 +211,11 @@ pub async fn execute(
                             let sliced_lines = total_lines.saturating_sub(*offset_lines);
                             let out = if sliced.chars().count() > budget {
                                 // 部分読み込み: read_files に追加しない（上書き・削除を防ぐ）
-                                let truncated: String = sliced.chars().take(budget).collect();
+                                // 長い1行の途中で切ると次オフセットが未読部分をスキップするため
+                                // 必ず最後の完全な改行位置で切り詰める
+                                let char_budget: String = sliced.chars().take(budget).collect();
+                                let safe_end = char_budget.rfind('\n').map(|i| i + 1).unwrap_or(char_budget.len());
+                                let truncated = &char_budget[..safe_end];
                                 let shown_lines = truncated.lines().count();
                                 let remaining = sliced_lines.saturating_sub(shown_lines);
                                 let next_offset = offset_lines + shown_lines;
@@ -287,12 +318,22 @@ pub async fn execute(
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => {
-                        if abs.exists() && !read_files.contains(&abs) {
+                        // symlink の場合はリンク先ではなくリンク自体を操作する元パスを使う
+                        let raw_path = root.join(path.as_str());
+                        let target = if raw_path.symlink_metadata()
+                            .map(|m| m.file_type().is_symlink())
+                            .unwrap_or(false)
+                        {
+                            raw_path.clone()
+                        } else {
+                            abs.clone()
+                        };
+                        if target.exists() && !read_files.contains(&abs) {
                             format!(
                                 "ERROR: '{path}' は未読です。先に read_file で内容を確認してから削除してください。"
                             )
                         } else {
-                            match std::fs::remove_file(&abs) {
+                            match std::fs::remove_file(&target) {
                                 Ok(_) => {
                                     read_files.remove(&abs);
                                     "OK".to_string()

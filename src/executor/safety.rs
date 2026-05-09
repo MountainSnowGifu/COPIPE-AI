@@ -8,8 +8,8 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     "git",
     // ファイル閲覧・検索（書き込みなし）
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
-    // テキスト処理（sed は -i を別途ブロック）
-    "sort", "uniq", "tr", "cut", "awk", "sed", "jq",
+    // テキスト処理（awk は system() でシェル実行可、sed は w コマンドで書き込み可のため除外）
+    "sort", "uniq", "tr", "cut", "jq",
     // 情報表示（引数ゼロ限定。環境変数表示のみ）
     "echo", "printf", "date",
 ];
@@ -34,7 +34,6 @@ const BLOCKED_CARGO_SUBCMDS: &[&str] = &["run", "test", "bench", "fix", "install
 
 /// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
 const BLOCKED_ARGS: &[(&str, &[&str])] = &[
-    ("sed",  &["-i", "--in-place"]),
     ("find", &["-delete", "-exec", "-execdir"]),
 ];
 

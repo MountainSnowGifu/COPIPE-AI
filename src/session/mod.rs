@@ -75,6 +75,7 @@ impl Drop for CopilotSession {
 
 impl CopilotSession {
     pub async fn start() -> anyhow::Result<Self> {
+        println!("[1/3] ブラウザを起動中...");
         let port = free_port();
         let mut edge = launch_edge(port)?;
         let result = Self::init(port, &mut edge).await;
@@ -92,6 +93,7 @@ impl CopilotSession {
         port: u16,
         edge: &mut Child,
     ) -> anyhow::Result<(chromiumoxide::Page, tokio::task::JoinHandle<()>)> {
+        println!("[2/3] Copilot に接続中...");
         let ws_url = get_ws_url(port).await?;
         let (browser, mut handler) = Browser::connect(&ws_url).await?;
         let handle = tokio::spawn(async move {
@@ -102,6 +104,7 @@ impl CopilotSession {
                 }
             }
         });
+        println!("[3/3] セッションを初期化中...");
         match prepare_copilot_page(&browser).await {
             Ok(page) => Ok((page, handle)),
             Err(e) => {

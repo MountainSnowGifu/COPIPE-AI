@@ -204,8 +204,9 @@ pub async fn run_agent(
 
         for r in &tool_results {
             if r.label == "ParseError" {
+                // #5: ParseError 案内を改善
                 if verbose {
-                    println!("  {RED_BOLD}[ParseError]{RESET} JSON パース失敗（詳細は browser_log）");
+                    println!("  {RED_BOLD}[ParseError]{RESET} JSON パース失敗 {DIM}(詳細は .copipe_logs/browser_log){RESET}");
                 }
             } else if r.output.starts_with("ERROR:") {
                 println!("  {RED_BOLD}[{}]{RESET} {}", r.label, r.output);
@@ -239,6 +240,7 @@ pub async fn run_agent(
         prompt = format!("{ctx}\n\n{}", format_tool_results(&tool_results));
     }
 
+    // #7: サマリー表示（失敗行には → 以降のエラー概要を含む）
     if !done_log.is_empty() {
         let header = if reached_max { "── 実行サマリー（中断）" } else { "── 実行サマリー" };
         println!("\n{BOLD}{header}{RESET}");
@@ -246,20 +248,28 @@ pub async fn run_agent(
             if item.starts_with('✓') {
                 println!("  {GREEN}{item}{RESET}");
             } else {
-                println!("  {RED}{item}{RESET}");
+                // ✗ Label → エラー本文 の形式
+                // エラー本文が長い場合は最初の1行のみ表示
+                let display = if let Some(arrow) = item.find(" → ") {
+                    let reason = &item[arrow + 3..];
+                    let first_line: String = reason.lines().next().unwrap_or("").chars().take(80).collect();
+                    let suffix = if first_line.len() < reason.len() { "…" } else { "" };
+                    format!("{}{suffix}", &item[..arrow + 3 + first_line.len()])
+                } else {
+                    item.clone()
+                };
+                println!("  {RED}{display}{RESET}");
             }
         }
     }
 
+    // #4: MAX_TURNS 到達時に具体的なガイダンスを表示
     if reached_max {
         println!("\n{YELLOW}最大ターン数 ({MAX_TURNS}) に達しました。{RESET}");
+        println!("{YELLOW}タスクが複雑すぎる可能性があります。{RESET}");
+        println!("{DIM}→ タスクをより小さな単位に分割して再試行してください。{RESET}");
+        println!("{DIM}  例: 「○○ファイルだけを読んで」「○○の修正だけを行って」{RESET}");
         println!("{DIM}※ タスクを再入力しても読み込み済みファイルの記録はリセットされます。{RESET}");
-        if !done_log.is_empty() {
-            println!("{DIM}  続行する場合は以下の完了済み作業を踏まえてタスクを絞り込んでください:{RESET}");
-            for item in done_log.iter().filter(|i| i.starts_with('✓')).take(5) {
-                println!("{DIM}    {item}{RESET}");
-            }
-        }
     }
 
     Ok(!reached_max)

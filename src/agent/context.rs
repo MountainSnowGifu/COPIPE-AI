@@ -18,10 +18,20 @@ pub(super) fn build_context_header(
             .map(|p| p.display().to_string())
             .collect();
         files.sort();
-        lines.push(format!(
-            "[読み込み済みファイル（再読み不要）] {}",
-            files.join(", ")
-        ));
+        let total = files.len();
+        let shown: Vec<String> = files.iter().take(10).cloned().collect();
+        if total > 10 {
+            lines.push(format!(
+                "[読み込み済みファイル（再読み不要）] {} … ({} 件省略)",
+                shown.join(", "),
+                total - 10
+            ));
+        } else {
+            lines.push(format!(
+                "[読み込み済みファイル（再読み不要）] {}",
+                shown.join(", ")
+            ));
+        }
     }
 
     if !done_log.is_empty() {
