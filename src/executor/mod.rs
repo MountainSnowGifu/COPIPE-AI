@@ -1,13 +1,17 @@
+mod diff;
+mod safety;
+
+use diff::apply_unified_diff;
+use safety::check_cmd_safety;
+
 use crate::command::AiCommand;
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// セッションログを置くディレクトリ（プロジェクトルート配下）
 pub const LOG_DIR: &str = ".copipe_logs";
 
-/// read_log で参照できるログ名の allowlist
 const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly"];
 
 pub struct ToolResult {
@@ -17,7 +21,6 @@ pub struct ToolResult {
 
 // ─── パス解決 ────────────────────────────────────────────────────────────────
 
-/// `root` 配下に収まる絶対パスを返す。ディレクトリ外・絶対パス・`..` は Err
 fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
     let raw_path = Path::new(raw);
 
@@ -36,7 +39,6 @@ fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("root の解決に失敗: {e}"))?;
     let joined = root_canonical.join(raw_path);
 
-    // 既存パス: シンボリックリンクを含む最終パスを完全解決してチェック
     if joined.exists() {
         let canonical = joined
             .canonicalize()
@@ -73,234 +75,12 @@ fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
     Ok(joined)
 }
 
-// ─── コマンド安全チェック ─────────────────────────────────────────────────────
-
-/// 実行を許可するコマンド名（allowlist 方式）
-/// mv / cp / touch は file/patch/mkdir で代替できるため除外
-const ALLOWED_EXECUTABLES: &[&str] = &[
-    // Rust toolchain
-    "cargo", "rustc", "rustfmt",
-    // バージョン管理（読み取り系のみ。書き込み系は ALLOWED_GIT_SUBCMDS で制限）
-    "git",
-    // ファイル閲覧・検索（書き込みなし）
-    "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
-    // テキスト処理（sed は -i を別途ブロック）
-    "sort", "uniq", "tr", "cut", "awk", "sed", "jq",
-    // ビルド
-    "make",
-    // 情報表示
-    "echo", "printf", "date", "env",
-];
-
-/// git で許可する読み取り系サブコマンド（それ以外はすべて拒否）
-const ALLOWED_GIT_SUBCMDS: &[&str] = &[
-    "log", "status", "diff", "show", "blame", "ls-files",
-    "describe", "branch", "tag", "grep", "rev-parse", "cat-file",
-    "shortlog", "reflog",
-];
-
-/// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
-const BLOCKED_ARGS: &[(&str, &[&str])] = &[
-    ("sed",  &["-i", "--in-place"]),
-    ("find", &["-delete", "-exec", "-execdir"]),
-];
-
-fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
-    let exe = cmd.first().ok_or_else(|| "cmd が空です".to_string())?;
-
-    if exe.starts_with('/') {
-        return Err(format!("アクセス拒否: 絶対パス '{exe}' での実行は禁止です"));
-    }
-
-    let basename = Path::new(exe)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(exe.as_str());
-
-    // allowlist: 許可リストにないコマンドはすべて拒否
-    if !ALLOWED_EXECUTABLES.contains(&basename) {
-        return Err(format!(
-            "アクセス拒否: '{basename}' は許可されていません。許可コマンド: {}",
-            ALLOWED_EXECUTABLES.join(", ")
-        ));
-    }
-
-    // 引数チェック: 絶対パス・`..` を拒否
-    for arg in &cmd[1..] {
-        if arg.starts_with('/') {
-            return Err(format!("アクセス拒否: 引数 '{arg}' に絶対パスが含まれています"));
-        }
-        if arg.contains("..") {
-            return Err(format!("アクセス拒否: 引数 '{arg}' に '..' が含まれています"));
-        }
-    }
-
-    // git は読み取り系サブコマンドのみ許可
-    if basename == "git" {
-        let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
-        if !ALLOWED_GIT_SUBCMDS.contains(&subcmd) {
-            return Err(format!(
-                "アクセス拒否: 'git {subcmd}' は許可されていません。許可サブコマンド: {}",
-                ALLOWED_GIT_SUBCMDS.join(", ")
-            ));
-        }
-    }
-
-    // コマンド固有の危険フラグを拒否
-    for (target, blocked) in BLOCKED_ARGS {
-        if basename == *target {
-            for arg in &cmd[1..] {
-                if blocked.contains(&arg.as_str()) {
-                    return Err(format!(
-                        "アクセス拒否: '{basename} {arg}' は危険なため禁止です"
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ─── unified diff アプライア ──────────────────────────────────────────────────
-
-/// `@@ -old_start[,old_count] +new_start[,new_count] @@` をパースして
-/// (old_start_1indexed, old_line_count) を返す
-fn parse_hunk_header(line: &str) -> Result<(usize, usize), String> {
-    // @@ の内側を取り出す
-    let inner = line
-        .trim_start_matches('@')
-        .split("@@")
-        .next()
-        .unwrap_or("")
-        .trim();
-
-    let parts: Vec<&str> = inner.split_whitespace().collect();
-    if parts.len() < 2 || !parts[0].starts_with('-') {
-        return Err(format!("不正なハンクヘッダー: `{line}`"));
-    }
-
-    let old_spec = &parts[0][1..]; // '-' を除く
-    let (start, count) = if let Some((s, c)) = old_spec.split_once(',') {
-        let s: usize = s.parse().map_err(|_| format!("行番号解析エラー: `{s}`"))?;
-        let c: usize = c.parse().map_err(|_| format!("行数解析エラー: `{c}`"))?;
-        (s, c)
-    } else {
-        let s: usize = old_spec.parse().map_err(|_| format!("行番号解析エラー: `{old_spec}`"))?;
-        (s, 1)
-    };
-
-    Ok((start, count))
-}
-
-/// 標準 unified diff を `content` に適用して新しい文字列を返す
-///
-/// diff 形式:
-///   `@@ -old_start,old_count +new_start,new_count @@`
-///   ` ` 始まり → コンテキスト行（変更なし）
-///   `-` 始まり → 削除行
-///   `+` 始まり → 追加行
-fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
-    // 末尾改行を保持しつつ行ベクタに展開
-    let trailing_newline = content.ends_with('\n');
-    let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
-    if trailing_newline {
-        lines.pop(); // split が生む末尾の空要素を除く
-    }
-
-    let diff_lines: Vec<&str> = diff.lines().collect();
-    let mut di = 0usize;
-    let mut offset: i64 = 0; // 適用済みハンクによる行番号ずれ
-
-    while di < diff_lines.len() {
-        let dl = diff_lines[di];
-        if !dl.starts_with("@@") {
-            di += 1;
-            continue;
-        }
-
-        let (old_start, _) = parse_hunk_header(dl)?;
-        di += 1;
-
-        // ハンク行を収集（次の @@ または末尾まで）
-        let mut hunk: Vec<(char, String)> = Vec::new();
-        while di < diff_lines.len() && !diff_lines[di].starts_with("@@") {
-            let hl = diff_lines[di];
-            // 空行は末尾の \n によるアーティファクトなのでスキップ
-            if hl.is_empty() {
-                di += 1;
-                continue;
-            }
-            let marker = hl.chars().next().unwrap_or(' ');
-            let body = if hl.len() > 1 { hl[1..].to_string() } else { String::new() };
-            if matches!(marker, ' ' | '-' | '+') {
-                hunk.push((marker, body));
-            }
-            di += 1;
-        }
-
-        // 適用開始位置（0-indexed、累積 offset で補正）
-        let apply_at = (old_start as i64 - 1 + offset).max(0) as usize;
-
-        // 削除/コンテキスト行の総数
-        let old_count = hunk.iter().filter(|(m, _)| matches!(m, ' ' | '-')).count();
-
-        if apply_at + old_count > lines.len() {
-            return Err(format!(
-                "パッチ適用失敗: 行 {apply_at}+1 から {old_count} 行を置換できません（ファイルは {} 行）",
-                lines.len()
-            ));
-        }
-
-        // コンテキスト行の一致を検証（末尾スペース差異は許容）
-        let mut old_idx = apply_at;
-        for (marker, expected) in &hunk {
-            if matches!(marker, ' ' | '-') {
-                let actual = lines.get(old_idx).map(|s| s.as_str()).unwrap_or("<ファイル終端>");
-                let matches = actual == expected.as_str()
-                    || actual.trim_end() == expected.trim_end();
-                if !matches {
-                    return Err(format!(
-                        "パッチ適用失敗: 行 {} のコンテキストが一致しません\n  期待: {:?}\n  実際: {:?}",
-                        old_idx + 1,
-                        expected,
-                        actual
-                    ));
-                }
-                old_idx += 1;
-            }
-        }
-
-        // コンテキスト + 追加行で置換
-        let new_lines: Vec<String> = hunk
-            .iter()
-            .filter(|(m, _)| matches!(m, ' ' | '+'))
-            .map(|(_, c)| c.clone())
-            .collect();
-
-        let added   = hunk.iter().filter(|(m, _)| *m == '+').count() as i64;
-        let removed = hunk.iter().filter(|(m, _)| *m == '-').count() as i64;
-        lines.splice(apply_at..apply_at + old_count, new_lines);
-        offset += added - removed;
-    }
-
-    let mut result = lines.join("\n");
-    if trailing_newline {
-        result.push('\n');
-    }
-    Ok(result)
-}
-
 // ─── executor ────────────────────────────────────────────────────────────────
 
-/// コマンドを実行し、(ツール結果, 表示メッセージ) を返す
-/// `read_files` はセッション内で読み込んだファイルを追跡する（再読み防止・ファイル上書きガード用）
-/// `listed_dirs` はセッション内でリスト済みのディレクトリを追跡する（再リスト防止用）
 pub async fn execute(
     root: &Path,
     commands: &[AiCommand],
     read_files: &mut HashSet<PathBuf>,
-    listed_dirs: &mut HashSet<PathBuf>,
 ) -> (Vec<ToolResult>, Vec<String>) {
     let mut results = Vec::new();
     let mut messages = Vec::new();
@@ -319,20 +99,13 @@ pub async fn execute(
                 read_file_done = true;
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
-                    Ok(abs) => {
-                        if read_files.contains(&abs) {
-                            // 既読ファイルは再読しない
-                            "既に読み込み済みです。内容はすでにコンテキストにあります。再読は不要です。次のアクションに進んでください。".to_string()
-                        } else {
-                            match std::fs::read_to_string(&abs) {
-                                Ok(content) => {
-                                    read_files.insert(abs);
-                                    format!("```\n{content}\n```")
-                                }
-                                Err(e) => format!("ERROR: {e}"),
-                            }
+                    Ok(abs) => match std::fs::read_to_string(&abs) {
+                        Ok(content) => {
+                            read_files.insert(abs);
+                            format!("```\n{content}\n```")
                         }
-                    }
+                        Err(e) => format!("ERROR: {e}"),
+                    },
                 };
                 results.push(ToolResult {
                     label: format!("ReadFile({path})"),
@@ -342,32 +115,24 @@ pub async fn execute(
             AiCommand::ListDir { path } => {
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
-                    Ok(abs) => {
-                        if listed_dirs.contains(&abs) {
-                            // 既にリスト済みのディレクトリは再リストしない
-                            format!("既にリスト済みです。内容はすでにコンテキストにあります。再リストは不要です。次のアクションに進んでください。")
-                        } else {
-                            match std::fs::read_dir(&abs) {
-                                Err(e) => format!("ERROR: {e}"),
-                                Ok(entries) => {
-                                    listed_dirs.insert(abs);
-                                    let mut lines: Vec<String> = entries
-                                        .filter_map(|e| e.ok())
-                                        .map(|e| {
-                                            let name = e.file_name().to_string_lossy().into_owned();
-                                            if e.path().is_dir() {
-                                                format!("{name}/")
-                                            } else {
-                                                name
-                                            }
-                                        })
-                                        .collect();
-                                    lines.sort();
-                                    lines.join("\n")
-                                }
-                            }
+                    Ok(abs) => match std::fs::read_dir(&abs) {
+                        Err(e) => format!("ERROR: {e}"),
+                        Ok(entries) => {
+                            let mut lines: Vec<String> = entries
+                                .filter_map(|e| e.ok())
+                                .map(|e| {
+                                    let name = e.file_name().to_string_lossy().into_owned();
+                                    if e.path().is_dir() {
+                                        format!("{name}/")
+                                    } else {
+                                        name
+                                    }
+                                })
+                                .collect();
+                            lines.sort();
+                            lines.join("\n")
                         }
-                    }
+                    },
                 };
                 results.push(ToolResult {
                     label: format!("ListDir({path})"),
@@ -378,7 +143,6 @@ pub async fn execute(
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => {
-                        // 既存ファイルは read_files に記録済みの場合のみ上書き可
                         if abs.exists() && !read_files.contains(&abs) {
                             format!(
                                 "ERROR: '{path}' は未読です。先に read_file で内容を確認してから上書きしてください。"
@@ -440,10 +204,9 @@ pub async fn execute(
                 });
             }
             AiCommand::DeleteFolder { path } => {
-                // 作成履歴の追跡なしに remove_dir_all は危険なため無効化
                 results.push(ToolResult {
                     label: format!("DeleteFolder({path})"),
-                    output: "ERROR: delete_folder は無効です。AI が作成したディレクトリの追跡が未実装のため誤削除防止のため禁止しています。delete_file を使って個別に削除してください。".to_string(),
+                    output: "ERROR: delete_folder は無効です。delete_file を使って個別に削除してください。".to_string(),
                 });
             }
             AiCommand::Txt { content } => {
@@ -455,8 +218,13 @@ pub async fn execute(
                     messages.push(msg.to_string());
                 }
             }
-            AiCommand::Cmd { name, cmd, workdir, timeout: timeout_secs } => {
-                println!("[{}] {} 実行中...", name, cmd.join(" "));
+            AiCommand::Cmd {
+                name,
+                cmd,
+                workdir,
+                timeout: timeout_secs,
+            } => {
+                println!("[{name}] {} 実行中...", cmd.join(" "));
                 let output = if *timeout_secs == 0 {
                     "ERROR: timeout は必須です。1以上の秒数を指定して再生成してください。"
                         .to_string()
@@ -477,7 +245,6 @@ pub async fn execute(
                         None => root.to_path_buf(),
                     };
 
-                    // kill_on_drop(true) でタイムアウト時に子プロセスを確実に kill
                     let child = tokio::process::Command::new(&cmd[0])
                         .args(&cmd[1..])
                         .current_dir(&workdir_path)
@@ -517,11 +284,13 @@ pub async fn execute(
                         }
                     }
                 };
-                // cmd_log に追記（失敗しても無視）
+
+                // cmd_log に追記
                 let log_dir = root.join(LOG_DIR);
                 std::fs::create_dir_all(&log_dir).ok();
                 if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true).append(true)
+                    .create(true)
+                    .append(true)
                     .open(log_dir.join("cmd_log"))
                 {
                     let entry = format!("$ {}\n{}\n---\n", cmd.join(" "), output);
@@ -596,7 +365,6 @@ pub async fn execute(
     (results, messages)
 }
 
-/// ツール結果をCopilotへ返すプロンプトに整形する
 pub fn format_tool_results(results: &[ToolResult]) -> String {
     let mut parts = vec!["[ツール実行結果]".to_string()];
     for r in results {

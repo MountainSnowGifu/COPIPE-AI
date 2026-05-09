@@ -1,5 +1,4 @@
 mod agent;
-mod browser;
 mod color;
 mod command;
 mod executor;

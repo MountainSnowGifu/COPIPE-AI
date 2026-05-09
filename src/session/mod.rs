@@ -1,4 +1,5 @@
-use crate::browser::{free_port, launch_edge};
+mod browser;
+use browser::{free_port, launch_edge};
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
