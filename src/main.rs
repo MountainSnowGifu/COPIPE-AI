@@ -1,7 +1,10 @@
 mod browser;
 mod command;
+mod executor;
+
 use browser::{free_port, launch_edge};
 use command::parse_commands;
+use executor::{execute, format_tool_results};
 
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
@@ -9,6 +12,34 @@ use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocument
 use futures::StreamExt;
 use std::process::Child;
 use std::time::Duration;
+
+// ─── システムプロンプト ───────────────────────────────────────────────────────
+
+fn build_system_prompt(root: &std::path::Path) -> String {
+    format!(
+        r#"あなたはコーディングアシスタントです。ユーザーのタスクをツールを使って実行します。
+
+作業ディレクトリ: {root}
+ファイルパスは必ずこのディレクトリからの相対パスで指定してください。
+
+【重要】必ずJSONのコードブロック（```json\n...\n```）で応答してください。
+複数コマンドは配列にしてください。
+
+使えるツール:
+- ファイル読み込み: {{"type": "read_file", "path": "相対パス"}}
+- ファイル書き込み: {{"type": "file", "path": "相対パス", "content": "内容"}}
+- ディレクトリ作成: {{"type": "mkdir", "path": "相対パス"}}
+- ファイル削除:   {{"type": "delete_file", "path": "相対パス"}}
+- ユーザーへ表示: {{"type": "txt", "content": "メッセージ"}}
+- タスク完了:     {{"type": "bot", "message": "完了メッセージ"}}
+
+ツール実行結果は「[ツール実行結果]」として返ってきます。
+全てのタスクが完了したら必ず {{"type": "bot", "message": "..."}} で終えてください。"#,
+        root = root.display()
+    )
+}
+
+// ─── Browser / Page ──────────────────────────────────────────────────────────
 
 async fn get_ws_url(port: u16) -> anyhow::Result<String> {
     let url = format!("http://127.0.0.1:{port}/json/version");
@@ -69,44 +100,22 @@ async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<chromiumoxide
     Ok(page)
 }
 
-async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
-    let raw = page
-        .evaluate_expression(&format!(
-            r#"
-            (() => {{
-                const msgs = document.querySelectorAll('[data-testid="ai-message"]');
-                if (msgs.length < {n}) return '';
-                const el = msgs[{n} - 1];
-                // pre > code のみ（インラインコードは除外）
-                const blocks = [...el.querySelectorAll('pre > code')];
-                return blocks.map(b => b.innerText.trim()).filter(t => t).join('\x00');
-            }})()
-        "#
-        ))
-        .await
-        .ok()
-        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-        .unwrap_or_default();
-
-    if raw.is_empty() {
-        return vec![];
-    }
-    raw.split('\x00')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        // JSON として妥当なブロックのみ採用
-        .filter(|s| serde_json::from_str::<serde_json::Value>(s).is_ok())
-        .collect()
+async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Result<usize> {
+    let n = page
+        .evaluate_expression(r#"document.querySelectorAll('[data-testid="ai-message"]').length"#)
+        .await?
+        .value()
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| anyhow::anyhow!("ai-message 数の取得に失敗"))?;
+    Ok(n as usize)
 }
 
 fn extract_ai_text(raw: &str) -> String {
     let text = raw.trim();
-    // 先頭の "Copilot の発言" プレフィックスを除去
     let text = text
         .strip_prefix("Copilot の発言\n")
         .or_else(|| text.strip_prefix("Copilot の発言"))
         .unwrap_or(text);
-    // 末尾の UI テキスト（ページ内編集ボタン、引用リンクなど）を切り落とす
     let cutoffs = [
         "\nページ内で編集します",
         "\nFluentU",
@@ -120,183 +129,6 @@ fn extract_ai_text(raw: &str) -> String {
         }
     }
     text.trim().to_string()
-}
-
-struct CopilotSession {
-    page: chromiumoxide::Page,
-    edge: Child,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for CopilotSession {
-    fn drop(&mut self) {
-        self.handle.abort();
-        self.edge.kill().ok();
-        self.edge.wait().ok(); // zombie 化防止
-    }
-}
-
-async fn focus_input(page: &chromiumoxide::Page) -> anyhow::Result<()> {
-    wait_for_element(page, "#userInput", 10).await?;
-    page.evaluate_expression("document.querySelector('#userInput').focus()")
-        .await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(())
-}
-
-async fn set_input_value(page: &chromiumoxide::Page, prompt: &str) -> anyhow::Result<()> {
-    let js_str = serde_json::to_string(prompt)?;
-    page.evaluate_expression(&format!(
-        r#"
-        (function() {{
-            const el = document.querySelector('#userInput');
-            if (!el) return 'not found';
-            const setter = Object.getOwnPropertyDescriptor(
-                window.HTMLTextAreaElement.prototype, 'value'
-            ).set;
-            setter.call(el, {js_str});
-            el.dispatchEvent(new Event('input',  {{ bubbles: true }}));
-            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return 'ok';
-        }})()
-    "#
-    ))
-    .await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    Ok(())
-}
-
-async fn submit_input(page: &chromiumoxide::Page) -> anyhow::Result<()> {
-    page.evaluate_expression(r#"
-        (function() {
-            var el = document.querySelector('#userInput');
-            if (!el) return;
-            el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true}));
-            el.dispatchEvent(new KeyboardEvent('keyup',   {key: 'Enter', code: 'Enter', bubbles: true}));
-        })();
-    "#)
-    .await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(())
-}
-
-impl CopilotSession {
-    async fn start() -> anyhow::Result<Self> {
-        let port = free_port();
-        let mut edge = launch_edge(port)?;
-
-        // Browser::connect 以降の失敗でも edge を確実に回収するクロージャ
-        let result = Self::init(port, &mut edge).await;
-        match result {
-            Ok((page, handle)) => Ok(Self { page, edge, handle }),
-            Err(e) => {
-                edge.kill().ok();
-                edge.wait().ok();
-                Err(e)
-            }
-        }
-    }
-
-    async fn init(
-        port: u16,
-        edge: &mut Child,
-    ) -> anyhow::Result<(chromiumoxide::Page, tokio::task::JoinHandle<()>)> {
-        let ws_url = get_ws_url(port).await?;
-
-        let (browser, mut handler) = Browser::connect(&ws_url).await?;
-        let handle = tokio::spawn(async move {
-            while let Some(h) = handler.next().await {
-                if let Err(e) = h {
-                    eprintln!("Handler: {e}");
-                    break;
-                }
-            }
-        });
-        match prepare_copilot_page(&browser).await {
-            Ok(page) => Ok((page, handle)),
-            Err(e) => {
-                handle.abort();
-                // edge の kill は呼び出し元で行う
-                let _ = edge;
-                Err(e)
-            }
-        }
-    }
-
-    async fn send(&mut self, prompt: &str) -> anyhow::Result<String> {
-        let page = &self.page;
-        let baseline = ai_message_count(page).await?;
-
-        focus_input(page).await?;
-        set_input_value(page, prompt).await?;
-        submit_input(page).await?;
-
-        wait_for_nth_response(page, baseline + 1, 90).await
-    }
-}
-
-async fn wait_for_nth_response(
-    page: &chromiumoxide::Page,
-    n: usize,
-    timeout_secs: u64,
-) -> anyhow::Result<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-    wait_for_ai_message_count(page, n, deadline).await?;
-    wait_for_stable_ai_text(page, n, deadline).await
-}
-
-async fn wait_for_ai_message_count(
-    page: &chromiumoxide::Page,
-    n: usize,
-    deadline: tokio::time::Instant,
-) -> anyhow::Result<()> {
-    eprintln!("Waiting for response to start...");
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let count = ai_message_count(page).await.unwrap_or(0);
-        if count >= n {
-            eprintln!("Response detected.");
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("Timed out waiting for response to start");
-        }
-    }
-}
-
-async fn wait_for_stable_ai_text(
-    page: &chromiumoxide::Page,
-    n: usize,
-    deadline: tokio::time::Instant,
-) -> anyhow::Result<String> {
-    eprintln!("Waiting for response to finish...");
-    let mut last_text = String::new();
-    let mut stable_secs = 0u64;
-
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let text = read_nth_ai_text(page, n).await;
-
-        if !text.is_empty() && text == last_text {
-            stable_secs += 1;
-            eprintln!("Stable {stable_secs}/10 ({} chars)", text.len());
-            if stable_secs >= 10 {
-                eprintln!("Response finished.");
-                return Ok(text);
-            }
-        } else if !text.is_empty() {
-            eprintln!("Generating... ({} chars)", text.len());
-            stable_secs = 0;
-            last_text = text;
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            if !last_text.is_empty() {
-                return Ok(last_text);
-            }
-            anyhow::bail!("Timed out waiting for response text");
-        }
-    }
 }
 
 async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> String {
@@ -322,87 +154,313 @@ async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> String {
     extract_ai_text(&raw)
 }
 
-async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Result<usize> {
-    let n = page
-        .evaluate_expression(r#"document.querySelectorAll('[data-testid="ai-message"]').length"#)
-        .await?
-        .value()
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| anyhow::anyhow!("ai-message 数の取得に失敗"))?;
-    Ok(n as usize)
+async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
+    let raw = page
+        .evaluate_expression(&format!(
+            r#"
+            (() => {{
+                const msgs = document.querySelectorAll('[data-testid="ai-message"]');
+                if (msgs.length < {n}) return '';
+                const el = msgs[{n} - 1];
+                const blocks = [...el.querySelectorAll('pre > code')];
+                return blocks.map(b => b.innerText.trim()).filter(t => t).join('\x00');
+            }})()
+        "#
+        ))
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+        .unwrap_or_default();
+
+    if raw.is_empty() {
+        return vec![];
+    }
+    raw.split('\x00')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| serde_json::from_str::<serde_json::Value>(s).is_ok())
+        .collect()
 }
 
-fn print_blocks(blocks: &[String]) {
-    for block in blocks {
-        match parse_commands(block) {
-            Ok(cmds) => {
-                for cmd in &cmds {
-                    println!("{cmd:#?}");
-                }
-            }
+// ─── CopilotSession ──────────────────────────────────────────────────────────
+
+struct CopilotSession {
+    page: chromiumoxide::Page,
+    edge: Child,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for CopilotSession {
+    fn drop(&mut self) {
+        self.handle.abort();
+        self.edge.kill().ok();
+        self.edge.wait().ok();
+    }
+}
+
+impl CopilotSession {
+    async fn start() -> anyhow::Result<Self> {
+        let port = free_port();
+        let mut edge = launch_edge(port)?;
+        let result = Self::init(port, &mut edge).await;
+        match result {
+            Ok((page, handle)) => Ok(Self { page, edge, handle }),
             Err(e) => {
-                // デシリアライズ失敗時は生 JSON を表示
-                eprintln!("デシリアライズ失敗 ({e}): {block}");
+                edge.kill().ok();
+                edge.wait().ok();
+                Err(e)
             }
         }
     }
-    println!();
+
+    async fn init(
+        port: u16,
+        edge: &mut Child,
+    ) -> anyhow::Result<(chromiumoxide::Page, tokio::task::JoinHandle<()>)> {
+        let ws_url = get_ws_url(port).await?;
+        let (browser, mut handler) = Browser::connect(&ws_url).await?;
+        let handle = tokio::spawn(async move {
+            while let Some(h) = handler.next().await {
+                if let Err(e) = h {
+                    eprintln!("Handler: {e}");
+                    break;
+                }
+            }
+        });
+        match prepare_copilot_page(&browser).await {
+            Ok(page) => Ok((page, handle)),
+            Err(e) => {
+                handle.abort();
+                let _ = edge;
+                Err(e)
+            }
+        }
+    }
+
+    async fn send_raw(&mut self, prompt: &str) -> anyhow::Result<()> {
+        let page = &self.page;
+        let baseline = ai_message_count(page).await?;
+
+        wait_for_element(page, "#userInput", 10).await?;
+        page.evaluate_expression("document.querySelector('#userInput').focus()")
+            .await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let js_str = serde_json::to_string(prompt)?;
+        page.evaluate_expression(&format!(
+            r#"
+            (function() {{
+                const el = document.querySelector('#userInput');
+                if (!el) return 'not found';
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                setter.call(el, {js_str});
+                el.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return 'ok';
+            }})()
+        "#
+        ))
+        .await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        page.evaluate_expression(r#"
+            (function() {
+                var el = document.querySelector('#userInput');
+                if (!el) return;
+                el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true}));
+                el.dispatchEvent(new KeyboardEvent('keyup',   {key: 'Enter', code: 'Enter', bubbles: true}));
+            })();
+        "#)
+        .await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let target = baseline + 1;
+        wait_for_ai_message_count(page, target, 90).await?;
+        wait_for_stable_text(page, target, 90).await?;
+        Ok(())
+    }
 }
 
-async fn send_with_json_retry(session: &mut CopilotSession, prompt: &str) -> anyhow::Result<()> {
-    session.send(prompt).await?;
+async fn wait_for_ai_message_count(
+    page: &chromiumoxide::Page,
+    n: usize,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    eprintln!("Waiting for response...");
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if ai_message_count(page).await.unwrap_or(0) >= n {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("Timed out waiting for response");
+        }
+    }
+}
+
+async fn wait_for_stable_text(
+    page: &chromiumoxide::Page,
+    n: usize,
+    timeout_secs: u64,
+) -> anyhow::Result<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut last = String::new();
+    let mut stable = 0u64;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let text = read_nth_ai_text(page, n).await;
+
+        if !text.is_empty() && text == last {
+            stable += 1;
+            eprintln!("Stable {stable}/5 ({} chars)", text.len());
+            if stable >= 5 {
+                return Ok(text);
+            }
+        } else if !text.is_empty() {
+            eprintln!("Generating... ({} chars)", text.len());
+            stable = 0;
+            last = text;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            if !last.is_empty() {
+                return Ok(last);
+            }
+            anyhow::bail!("Timed out waiting for response text");
+        }
+    }
+}
+
+// ─── エージェントループ ────────────────────────────────────────────────────────
+
+/// JSON ブロックをパースし (コマンド列, エラー列) を返す
+fn parse_blocks(blocks: &[String]) -> (Vec<command::AiCommand>, Vec<String>) {
+    let mut commands = Vec::new();
+    let mut errors = Vec::new();
+    for b in blocks {
+        match parse_commands(b) {
+            Ok(cmds) => commands.extend(cmds),
+            Err(e) => errors.push(format!(
+                "JSONパースエラー: {e}\n元のブロック:\n```\n{b}\n```\n正しいスキーマで再出力してください。"
+            )),
+        }
+    }
+    (commands, errors)
+}
+
+async fn get_commands(
+    session: &mut CopilotSession,
+    prompt: &str,
+) -> anyhow::Result<(Vec<command::AiCommand>, Vec<String>)> {
+    session.send_raw(prompt).await?;
     let n = ai_message_count(&session.page).await?;
     let blocks = get_codeblocks_from_dom(&session.page, n).await;
-    if !blocks.is_empty() {
-        print_blocks(&blocks);
-        return Ok(());
+
+    if blocks.is_empty() {
+        eprintln!("JSON ブロックなし → 再要求します");
+        session
+            .send_raw("JSON コードブロックで回答してください。")
+            .await?;
+        let n2 = ai_message_count(&session.page).await?;
+        let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
+        return Ok(parse_blocks(&blocks2));
     }
 
-    eprintln!("コードブロックなし → JSON で返すよう要求します");
-    session
-        .send("返答をコードブロック付きの JSON 形式で出力してください。")
-        .await?;
-    let n2 = ai_message_count(&session.page).await?;
-    let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
-    if !blocks2.is_empty() {
-        print_blocks(&blocks2);
-    } else {
-        eprintln!("コードブロックが取得できませんでした");
-        println!();
+    Ok(parse_blocks(&blocks))
+}
+
+const MAX_TURNS: u32 = 20;
+
+async fn run_agent(
+    session: &mut CopilotSession,
+    root: &std::path::Path,
+    user_task: &str,
+) -> anyhow::Result<()> {
+    let mut prompt = user_task.to_string();
+
+    for turn in 0..MAX_TURNS {
+        let (commands, parse_errors) = get_commands(session, &prompt).await?;
+
+        // パースエラーを ToolResult として積む
+        let mut tool_results: Vec<executor::ToolResult> = parse_errors
+            .into_iter()
+            .map(|e| executor::ToolResult {
+                label: "ParseError".to_string(),
+                output: e,
+            })
+            .collect();
+
+        if commands.is_empty() && tool_results.is_empty() {
+            eprintln!("コマンドが取得できませんでした");
+            break;
+        }
+
+        let (exec_results, messages) = execute(root, &commands);
+        tool_results.extend(exec_results);
+
+        for msg in &messages {
+            println!("\n[AI] {msg}");
+        }
+
+        if tool_results.is_empty() {
+            break;
+        }
+
+        for r in &tool_results {
+            println!("[{}] {}", r.label, r.output);
+        }
+
+        if turn + 1 == MAX_TURNS {
+            eprintln!("最大ターン数 ({MAX_TURNS}) に達しました。タスクを中断します。");
+            break;
+        }
+
+        prompt = format_tool_results(&tool_results);
     }
+
     Ok(())
 }
+
+// ─── main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use std::io::{self, BufRead, Write};
 
+    // CLI 引数でプロジェクトディレクトリを受け取る（省略時はカレントディレクトリ）
+    let root_arg = std::env::args().nth(1);
+    let root = match root_arg {
+        Some(ref p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir()?,
+    }
+    .canonicalize()?;
+
+    eprintln!("プロジェクトルート: {}", root.display());
+
     let mut session = CopilotSession::start().await?;
     eprintln!("Copilot に接続しました。");
 
-    // p.txt が存在すれば最初の質問として送る
-    let initial_prompt = std::fs::read_to_string("p.txt")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    eprintln!("システムプロンプト送信中...");
+    session.send_raw(&build_system_prompt(&root)).await?;
+    eprintln!("準備完了。");
 
-    if let Some(prompt) = initial_prompt {
-        eprintln!("p.txt を送信中...");
-        if let Err(e) = send_with_json_retry(&mut session, &prompt).await {
-            eprintln!("エラー: {e}");
-        }
-    }
-
-    println!("質問を入力してください（終了: Ctrl+D または 'exit'）");
+    println!(
+        "ToyClaudeCode へようこそ。[{}] のタスクを入力してください（終了: exit）",
+        root.display()
+    );
 
     let stdin = io::stdin();
     loop {
-        print!("> ");
+        print!("\n> ");
         io::stdout().flush()?;
 
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // EOF (Ctrl+D)
+            Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
                 eprintln!("入力エラー: {e}");
@@ -410,20 +468,20 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        let prompt = line.trim();
-        if prompt.is_empty() {
+        let task = line.trim();
+        if task.is_empty() {
             continue;
         }
-        if prompt == "exit" || prompt == "quit" {
+        if task == "exit" || task == "quit" {
             break;
         }
 
-        if let Err(e) = send_with_json_retry(&mut session, prompt).await {
+        if let Err(e) = run_agent(&mut session, &root, task).await {
             eprintln!("エラー: {e}");
         }
     }
 
     println!("終了します");
-    drop(session); // Drop が kill + wait を実行
+    drop(session);
     Ok(())
 }
