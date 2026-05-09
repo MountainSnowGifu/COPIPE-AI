@@ -253,16 +253,21 @@ async fn wait_for_ai_message_count(
     n: usize,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
+    use std::io::Write as _;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-    eprintln!("応答を待機中...");
+    let start = tokio::time::Instant::now();
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if ai_message_count(page).await.unwrap_or(0) >= n {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            eprintln!();
             anyhow::bail!("応答の開始がタイムアウトしました");
         }
+        let secs = start.elapsed().as_secs();
+        eprint!("\r応答を待機中... ({secs}秒)          ");
+        std::io::stderr().flush().ok();
     }
 }
 
@@ -271,6 +276,7 @@ async fn wait_for_stable_text(
     n: usize,
     timeout_secs: u64,
 ) -> anyhow::Result<String> {
+    use std::io::Write as _;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let mut last = String::new();
     let mut stable = 0u64;
@@ -281,17 +287,21 @@ async fn wait_for_stable_text(
 
         if !text.is_empty() && text == last {
             stable += 1;
-            eprintln!("安定 {stable}/5 ({} 文字)", text.len());
+            eprint!("\r安定確認中 {stable}/5 ({} 文字)          ", text.len());
+            std::io::stderr().flush().ok();
             if stable >= 5 {
+                eprintln!();
                 return Ok(text);
             }
         } else if !text.is_empty() {
-            eprintln!("生成中... ({} 文字)", text.len());
+            eprint!("\r生成中... ({} 文字)          ", text.len());
+            std::io::stderr().flush().ok();
             stable = 0;
             last = text;
         }
 
         if tokio::time::Instant::now() >= deadline {
+            eprintln!();
             if !last.is_empty() {
                 return Ok(last);
             }
@@ -371,7 +381,9 @@ impl CopilotSession {
             } else {
                 format!("（{part}/{total}）全データ送信完了。以降の処理を続けてください。\n{chunk}")
             };
-            eprintln!("プロンプト送信 ({part}/{total}, {}文字)", msg.len());
+            if total > 1 {
+                eprintln!("送信 {part}/{total} ({}文字)", msg.len());
+            }
             self.send_raw_single(&msg).await?;
         }
         Ok(())

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let mut session = CopilotSession::start().await?;
     eprintln!("Copilot に接続しました。");
 
-    eprintln!("システムプロンプト送信中 (最大90秒かかることがあります)...");
+    eprintln!("システムプロンプト送信中...");
     session.send_raw(&build_system_prompt(&root)).await?;
     eprintln!("準備完了。");
 
