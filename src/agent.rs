@@ -1,13 +1,14 @@
 use crate::color::{BOLD, DIM, GREEN, RED, RED_BOLD, CYAN_BOLD, RESET};
-use crate::command::parse_commands;
-use crate::executor::{execute, format_tool_results, ToolResult};
+use crate::command::{parse_commands, AiCommand};
+use crate::executor::{execute, format_tool_results, ToolResult, LOG_DIR};
 use crate::session::{ai_message_count, get_codeblocks_from_dom, CopilotSession};
+use std::io::Write as _;
 
 // ─── システムプロンプト ───────────────────────────────────────────────────────
 
 pub fn build_system_prompt(root: &std::path::Path) -> String {
     format!(
-        r#"あなたはコーディングアシスタントです。ユーザーのタスクをツールを使って実行します。
+        r#"あなたはコーディングアシスタントです。ユーザーのタスクをツールを使って完全に達成するまで自律的に作業を継続します。
 
 作業ディレクトリ: {root}
 ファイルパスは必ずこのディレクトリからの相対パスで指定してください。
@@ -23,11 +24,11 @@ JSONの後に文章を続けてはいけません。
 - ファイル書き込み: {{"type": "file", "path": "相対パス", "content": "内容"}}
 - 差分編集:         {{"type": "patch", "path": "相対パス", "diff": "@@ -1,3 +1,3 @@\n-旧行\n+新行\n コンテキスト"}}（ファイルの一部だけ変更したい場合に使用。コンテキスト行が一致しない場合はエラーになる）
 - ディレクトリ作成: {{"type": "mkdir", "path": "相対パス"}}
-- ファイル削除:   {{"type": "delete_file", "path": "相対パス"}}
-- コマンド実行:   {{"type": "cmd", "name": "説明", "cmd": ["cargo", "build"], "workdir": "相対パス", "timeout": 30}}
-- ユーザーへ表示: {{"type": "txt", "content": "日本語のメッセージ"}}
-- ログ読み取り:   {{"type": "read_log", "filename": "cmd_log"}}（cmd_log / ai_log / ai_readonly のいずれか。読んだ内容を解析し、必要なら次のアクションを自律的に生成して作業を継続してください）
-- タスク完了:     {{"type": "bot", "message": "完了メッセージ"}}
+- ファイル削除:     {{"type": "delete_file", "path": "相対パス"}}
+- コマンド実行:     {{"type": "cmd", "name": "説明", "cmd": ["cargo", "build"], "workdir": "相対パス", "timeout": 30}}
+- ユーザーへ表示:   {{"type": "txt", "content": "日本語のメッセージ"}}
+- ログ読み取り:     {{"type": "read_log", "filename": "cmd_log"}}（cmd_log / ai_log / ai_readonly のいずれか）
+- タスク完了:       {{"type": "bot", "message": "完了メッセージ"}}
 
 ## cmd のルール（必須）
 
@@ -39,8 +40,23 @@ cmd を使う場合、必ず timeout を指定してください。timeout が�
 - ../ を含むパスは禁止
 - / で始まる絶対パスは禁止
 
-ツール実行結果は「[ツール実行結果]」として返ってきます。
-全てのタスクが完了したら必ず {{"type": "bot", "message": "..."}} で終えてください。"#,
+## 自律動作のルール（重要）
+
+**エラーが発生した場合:**
+- エラー内容を分析し、原因を特定してから別のアプローチで再試行してください
+- 同じエラーが連続する場合は、アプローチ自体を変えてください（例: patch が失敗したら read_file で内容確認 → file で全書き換え）
+- ユーザーへの確認は不要です。自分で判断して作業を継続してください
+
+**コマンド実行後:**
+- ビルドやテストを実行したら、必ず read_log でコマンドの出力を確認してください
+- エラーがあれば修正して再実行してください。成功を確認してから次へ進んでください
+
+**タスク完了の判断:**
+- ユーザーの依頼が完全に達成できたと確認できるまで bot を使わないでください
+- 途中で状況が分からなくなったら read_log: ai_log で自分の過去の判断を、read_log: cmd_log でコマンド履歴を確認してください
+- bot は「全作業完了」のときだけ使います
+
+ツール実行結果は「[ツール実行結果]」として返ってきます。"#,
         root = root.display()
     )
 }
@@ -116,6 +132,26 @@ pub async fn run_agent(
         eprintln!("{DIM}[ターン {}/{}]{RESET}", turn + 1, MAX_TURNS);
         let (commands, parse_errors) = get_commands(session, &prompt).await?;
 
+        // ai_log にこのターンの命令を記録
+        {
+            let log_dir = root.join(LOG_DIR);
+            std::fs::create_dir_all(&log_dir).ok();
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open(log_dir.join("ai_log"))
+            {
+                let mut entry = format!("=== ターン {} ===\n", turn + 1);
+                for cmd in &commands {
+                    entry.push_str(&format!("{}\n", serde_json::to_string(cmd).unwrap_or_default()));
+                }
+                for e in &parse_errors {
+                    entry.push_str(&format!("[ParseError] {e}\n"));
+                }
+                entry.push_str("---\n");
+                f.write_all(entry.as_bytes()).ok();
+            }
+        }
+
         let mut tool_results: Vec<ToolResult> = parse_errors
             .into_iter()
             .map(|e| ToolResult {
@@ -128,6 +164,9 @@ pub async fn run_agent(
             println!("コマンドが取得できませんでした");
             break;
         }
+
+        // Bot コマンドが含まれていたら完了とみなしてループを抜ける
+        let is_done = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }));
 
         let (exec_results, messages) = execute(root, &commands, &mut read_files).await;
         for r in &exec_results {
@@ -143,7 +182,7 @@ pub async fn run_agent(
             println!("\n{CYAN_BOLD}[AI]{RESET} {msg}");
         }
 
-        if tool_results.is_empty() {
+        if tool_results.is_empty() || is_done {
             break;
         }
 

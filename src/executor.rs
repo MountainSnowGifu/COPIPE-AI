@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// セッションログを置くディレクトリ（プロジェクトルート配下）
-const LOG_DIR: &str = ".copipe_logs";
+pub const LOG_DIR: &str = ".copipe_logs";
 
 /// read_log で参照できるログ名の allowlist
 const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly"];
