@@ -31,6 +31,8 @@ pub enum AiCommand {
     },
     ReadFile {
         path: String,
+        #[serde(default)]
+        offset_lines: usize,
     },
     ListDir {
         path: String,

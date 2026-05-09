@@ -5,7 +5,7 @@ mod executor;
 mod session;
 
 use agent::{build_system_prompt, run_agent};
-use color::{BOLD, DIM, RESET};
+use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW};
 use executor::LOG_DIR;
 use session::CopilotSession;
 
@@ -25,8 +25,6 @@ async fn main() -> anyhow::Result<()> {
     }
     .canonicalize()?;
 
-    eprintln!("プロジェクトルート: {}", root.display());
-
     // 起動時にログを初期化
     let log_dir = root.join(LOG_DIR);
     std::fs::create_dir_all(&log_dir).ok();
@@ -34,16 +32,17 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(log_dir.join(name), "").ok();
     }
 
+    println!("{DIM}ブラウザを起動中...{RESET}");
     let mut session = CopilotSession::start().await?;
-    eprintln!("Copilot に接続しました。");
+    println!("{GREEN_BOLD}✓{RESET} Copilot に接続しました");
 
-    eprintln!("システムプロンプト送信中...");
+    println!("{DIM}初期化中...{RESET}");
     session.send_raw(&build_system_prompt(&root)).await?;
-    eprintln!("準備完了。");
+    println!("{GREEN_BOLD}✓{RESET} 準備完了\n");
 
-    println!("{BOLD}╔══════════════════════════════════════════════════╗{RESET}");
-    println!("{BOLD}║             COPIPE-AI へようこそ                 ║{RESET}");
-    println!("{BOLD}╚══════════════════════════════════════════════════╝{RESET}");
+    println!("{CYAN_BOLD}╔══════════════════════════════════════════════════╗{RESET}");
+    println!("{CYAN_BOLD}║{RESET}          {BOLD}COPIPE-AI へようこそ{RESET}                   {CYAN_BOLD}║{RESET}");
+    println!("{CYAN_BOLD}╚══════════════════════════════════════════════════╝{RESET}");
     println!("プロジェクト: {BOLD}{}{RESET}", root.display());
     println!();
     println!("{BOLD}操作方法{RESET}");
@@ -86,16 +85,16 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(ReadlineError::Interrupted) => {
                     if task.is_empty() {
-                        println!("(Ctrl+D で終了)");
+                        println!("{DIM}(Ctrl+D で終了){RESET}");
                     } else {
                         task.clear();
-                        println!("入力をクリアしました");
+                        println!("{DIM}入力をクリアしました{RESET}");
                     }
                     continue 'repl;
                 }
                 Err(ReadlineError::Eof) => break 'repl,
                 Err(e) => {
-                    eprintln!("入力エラー: {e}");
+                    println!("{RED_BOLD}入力エラー: {e}{RESET}");
                     break 'repl;
                 }
             }
@@ -110,12 +109,12 @@ async fn main() -> anyhow::Result<()> {
         }
         if task == ":v" || task == "verbose" {
             verbose = !verbose;
-            println!("verbose: {}", if verbose { "on" } else { "off" });
+            println!("verbose: {BOLD}{}{RESET}", if verbose { "on" } else { "off" });
             continue 'repl;
         }
         if task == ":y" {
             auto_confirm = !auto_confirm;
-            println!("確認スキップ: {}", if auto_confirm { "on" } else { "off" });
+            println!("確認スキップ: {BOLD}{}{RESET}", if auto_confirm { "on" } else { "off" });
             continue 'repl;
         }
 
@@ -134,19 +133,18 @@ async fn main() -> anyhow::Result<()> {
         println!("└──────────────────────────────────────────────────");
 
         if !auto_confirm && !skip_confirm {
-            // y / Y / Enter のみ実行。それ以外は再入力を促す。
             let confirmed = 'confirm: loop {
                 match rl.readline("実行しますか? [Y/n] ") {
                     Ok(ans) => match ans.trim() {
                         "" | "y" | "Y" => break 'confirm Some(true),
                         "n" | "N"      => break 'confirm Some(false),
-                        other => println!("「{other}」は無効です。y か n を半角英字で入力してください"),
+                        other => println!("「{other}」は無効です。y か n を入力してください"),
                     },
                     Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
                         break 'confirm Some(false);
                     }
                     Err(e) => {
-                        eprintln!("入力エラー: {e}");
+                        println!("{RED_BOLD}入力エラー: {e}{RESET}");
                         break 'confirm None;
                     }
                 }
@@ -154,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
             match confirmed {
                 Some(true) => {}
                 Some(false) => {
-                    println!("キャンセルしました");
+                    println!("{DIM}キャンセルしました{RESET}");
                     continue 'repl;
                 }
                 None => break 'repl,
@@ -165,12 +163,12 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             result = run_agent(&mut session, &root, &task, verbose) => {
                 match result {
-                    Ok(()) => println!("\n── タスク完了 ─────────────────────────────────────────"),
-                    Err(e) => println!("エラー: {e}"),
+                    Ok(()) => println!("\n{GREEN_BOLD}✓ タスク完了{RESET}"),
+                    Err(e) => println!("\n{RED_BOLD}エラー: {e}{RESET}"),
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("\nCtrl+C: タスクをキャンセルしました");
+                println!("\n{YELLOW}キャンセルしました{RESET}");
             }
         }
     }
@@ -178,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref p) = history_path {
         rl.save_history(p).ok();
     }
-    println!("終了します");
+    println!("{DIM}終了します{RESET}");
     drop(session);
     Ok(())
 }

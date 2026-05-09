@@ -118,7 +118,7 @@ async fn get_commands(
             if !has_truncation {
                 break;
             }
-            eprintln!("コードブロック途中切れ検出 → {}秒後に再取得 ({attempt}/3)", attempt);
+            eprintln!("{DIM}[再取得中 {attempt}/3]{RESET}");
             tokio::time::sleep(Duration::from_secs(attempt as u64 * 2)).await;
             let refreshed = get_codeblocks_from_dom(&session.page, n).await;
             if refreshed != last {
@@ -129,7 +129,7 @@ async fn get_commands(
     };
 
     if blocks.is_empty() {
-        eprintln!("JSON ブロックなし → 再要求します");
+        eprintln!("{DIM}[応答再要求]{RESET}");
         write_browser_log(root, "no JSON code block in latest AI message", session).await;
         if let Err(e) = session.send_raw(
             "次の作業ステップを JSON スキーマ形式で記述してください。\
@@ -248,10 +248,12 @@ pub async fn run_agent(
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0) as u64;
             let wait_ms = 2_000 + seed % 3_000; // 2〜5 秒
-            eprintln!("{DIM}次のターンまで {wait_ms}ms 待機...{RESET}");
+            if verbose {
+                eprintln!("{DIM}待機 {wait_ms}ms...{RESET}");
+            }
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
         }
-        eprintln!("{DIM}[ターン {}/{}]{RESET}", turn + 1, MAX_TURNS);
+        eprintln!("{DIM}[{}/{}]{RESET}", turn + 1, MAX_TURNS);
         let (commands, parse_errors) = get_commands(session, root, &prompt).await?;
 
         // ai_log にこのターンの命令を記録
@@ -369,8 +371,8 @@ pub async fn run_agent(
         }
 
         if turn + 1 == MAX_TURNS {
-            println!("最大ターン数 ({MAX_TURNS}) に達しました。");
-            println!("{DIM}タスクを再入力すると続きから作業できます。{RESET}");
+            use crate::color::YELLOW;
+            println!("{YELLOW}最大ターン数 ({MAX_TURNS}) に達しました。タスクを再入力すると続きから作業できます。{RESET}");
             reached_max = true;
             break;
         }

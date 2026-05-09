@@ -120,7 +120,7 @@ pub async fn execute(
 
     for cmd in commands {
         match cmd {
-            AiCommand::ReadFile { path } => {
+            AiCommand::ReadFile { path, offset_lines } => {
                 if read_file_done {
                     results.push(ToolResult {
                         label: format!("ReadFile({path})"),
@@ -132,23 +132,47 @@ pub async fn execute(
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => match std::fs::read_to_string(&abs) {
+                        Err(_) if !abs.exists() => {
+                            // ファイルが存在しない場合、親ディレクトリの内容を補足する
+                            let hint = abs.parent()
+                                .and_then(|p| std::fs::read_dir(p).ok())
+                                .map(|entries| {
+                                    let names: Vec<String> = entries
+                                        .filter_map(|e| e.ok())
+                                        .map(|e| e.file_name().to_string_lossy().to_string())
+                                        .collect();
+                                    format!(" 同ディレクトリの実在ファイル: {}", names.join(", "))
+                                })
+                                .unwrap_or_default();
+                            format!("ERROR: ファイルが存在しません: '{path}'.{hint}")
+                        }
                         Ok(content) => {
                             read_files.insert(abs);
-                            const MAX_FILE_CHARS: usize = 15_000;
-                            if content.chars().count() > MAX_FILE_CHARS {
-                                let truncated: String = content.chars().take(MAX_FILE_CHARS).collect();
-                                let total_lines = content.lines().count();
-                                let shown_lines = truncated.lines().count();
-                                format!("```\n{truncated}\n```\n[残り {} 行省略。続きが必要なら read_file を再度使用してください]", total_lines - shown_lines)
+                            const MAX_FILE_CHARS: usize = 8_000;
+                            let total_lines = content.lines().count();
+                            let sliced: String = if *offset_lines > 0 {
+                                content.lines().skip(*offset_lines).collect::<Vec<_>>().join("\n")
                             } else {
-                                format!("```\n{content}\n```")
+                                content.clone()
+                            };
+                            let sliced_lines = total_lines.saturating_sub(*offset_lines);
+                            if sliced.chars().count() > MAX_FILE_CHARS {
+                                let truncated: String = sliced.chars().take(MAX_FILE_CHARS).collect();
+                                let shown_lines = truncated.lines().count();
+                                let remaining = sliced_lines.saturating_sub(shown_lines);
+                                let next_offset = offset_lines + shown_lines;
+                                format!("```\n{truncated}\n```\n[残り {remaining} 行。続きは {{\"type\":\"read_file\",\"path\":\"{path}\",\"offset_lines\":{next_offset}}} で取得]")
+                            } else if *offset_lines > 0 {
+                                format!("```\n{sliced}\n```\n[{offset_lines} 行目以降を表示（全 {total_lines} 行）]")
+                            } else {
+                                format!("```\n{sliced}\n```")
                             }
                         }
                         Err(e) => format!("ERROR: {e}"),
                     },
                 };
                 results.push(ToolResult {
-                    label: format!("ReadFile({path})"),
+                    label: format!("ReadFile({path}@{offset_lines})"),
                     output,
                 });
             }
@@ -411,7 +435,7 @@ pub async fn execute(
 }
 
 pub fn format_tool_results(results: &[ToolResult]) -> String {
-    const MAX_TOTAL_CHARS: usize = 12_000;
+    const MAX_TOTAL_CHARS: usize = 6_000;
     let mut parts = vec!["[ツール実行結果]".to_string()];
     let mut used = parts[0].len();
     let total = results.len();
