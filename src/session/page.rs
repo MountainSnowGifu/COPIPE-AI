@@ -192,6 +192,11 @@ try {
         }
     }
 } catch(_) {}
+
+// devicePixelRatio を自然な値に設定
+try {
+    Object.defineProperty(window, 'devicePixelRatio', { get: () => 1.25 });
+} catch(_) {}
 "#;
 
 fn user_agent_metadata() -> anyhow::Result<UserAgentMetadata> {

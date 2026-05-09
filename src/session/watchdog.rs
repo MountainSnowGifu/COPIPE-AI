@@ -2,6 +2,29 @@ use super::dom::{ai_message_count, read_nth_ai_text, scroll_to_nth_ai_message};
 use std::path::Path;
 use std::time::Duration;
 
+/// 人間らしいアイドルマウス動作を発火する（bot 検知回避）
+async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
+    // 画面上の適当な位置に小さなマウス移動を生成
+    let x = 200.0 + (seed % 800) as f64;
+    let y = 150.0 + ((seed / 800) % 400) as f64;
+    let dx = ((seed % 30) as f64) - 15.0;
+    let dy = (((seed / 30) % 30) as f64) - 15.0;
+    let js = format!(
+        r#"document.dispatchEvent(new MouseEvent('mousemove', {{
+            bubbles: true, clientX: {x}, clientY: {y}
+        }}));
+        document.dispatchEvent(new MouseEvent('mousemove', {{
+            bubbles: true, clientX: {}, clientY: {}
+        }}));"#,
+        x + dx, y + dy
+    );
+    page.evaluate_expression(&js).await.ok();
+}
+
 fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
     if let Some(dir) = log_dir {
         use std::io::Write as IoWrite;
@@ -52,10 +75,21 @@ pub(super) async fn wait_for_ai_message_count(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let start = tokio::time::Instant::now();
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(7);
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if ai_message_count(page).await.unwrap_or(0) >= n {
             return Ok(());
+        }
+        // 7秒ごとにアイドルマウス動作（bot 検知回避）
+        if tokio::time::Instant::now() >= wiggle_at {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0) as u64;
+            wiggle_at = tokio::time::Instant::now()
+                + Duration::from_secs(5 + seed % 8); // 5〜12秒ごと
+            idle_mouse_wiggle(page).await;
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!();
@@ -108,6 +142,7 @@ pub(super) async fn wait_for_stable_text(
     let mut last = String::new();
     let mut stable = 0u64;
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(10);
 
     const POLL_MS: u64 = 800;
     const STABLE_NEEDED: u64 = 5; // 800ms × 5 = 4秒安定を要求
@@ -132,6 +167,16 @@ pub(super) async fn wait_for_stable_text(
             stable = 0;
             last = text;
             scroll_to_nth_ai_message(page, n).await;
+        }
+
+        // アイドルマウス動作（生成中も自然な操作感を維持）
+        if tokio::time::Instant::now() >= wiggle_at {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0) as u64;
+            wiggle_at = tokio::time::Instant::now() + Duration::from_secs(8 + seed % 10);
+            idle_mouse_wiggle(page).await;
         }
 
         if tokio::time::Instant::now() >= deadline {

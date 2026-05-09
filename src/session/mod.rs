@@ -171,36 +171,29 @@ impl CopilotSession {
         "#).await?;
         tokio::time::sleep(jitter(600, 400)).await;
 
-        // テキスト入力: ClipboardEvent(DataTransfer) でペースト擬似
-        // React setter より自然で bot 検知を回避しやすい
+        // テキスト入力: React setter を主軸にしつつ追加イベントで React state を確実に更新
         let js_str = serde_json::to_string(prompt)?;
         page.evaluate_expression(&format!(r#"
             (function() {{
                 const el = document.querySelector('#userInput');
                 if (!el) return 'not found';
-                // 方法1: DataTransfer ペースト（最も自然）
-                try {{
-                    const dt = new DataTransfer();
-                    dt.setData('text/plain', {js_str});
-                    el.dispatchEvent(new ClipboardEvent('paste', {{
-                        bubbles: true, cancelable: true, clipboardData: dt
-                    }}));
-                    if (el.value && el.value.length > 0) return 'paste_ok';
-                }} catch(_) {{}}
-                // 方法2: execCommand（DataTransfer 非対応環境向け）
-                try {{
-                    el.focus();
-                    el.select();
-                    if (document.execCommand('insertText', false, {js_str})) return 'execCommand_ok';
-                }} catch(_) {{}}
-                // 方法3: React setter フォールバック
-                const setter = Object.getOwnPropertyDescriptor(
+                // React の native value setter で値をセット（React state が確実に更新される）
+                const nativeSetter = Object.getOwnPropertyDescriptor(
                     window.HTMLTextAreaElement.prototype, 'value'
                 ).set;
-                setter.call(el, {js_str});
-                el.dispatchEvent(new Event('input',  {{bubbles: true}}));
-                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                return 'setter_fallback';
+                nativeSetter.call(el, {js_str});
+                // React が検知するイベントを順に発火
+                el.dispatchEvent(new Event('input',  {{bubbles: true, composed: true}}));
+                el.dispatchEvent(new Event('change', {{bubbles: true, composed: true}}));
+                // InputEvent も発火（より詳細な変更通知）
+                try {{
+                    el.dispatchEvent(new InputEvent('input', {{
+                        bubbles: true, composed: true,
+                        inputType: 'insertText',
+                        data: 'x'
+                    }}));
+                }} catch(_) {{}}
+                return 'react_setter_ok';
             }})()
         "#)).await?;
         tokio::time::sleep(jitter(900, 700)).await;
@@ -233,24 +226,41 @@ impl CopilotSession {
         if input_still_has_text && ai_message_count(page).await.unwrap_or(0) < target {
             let click_result = page.evaluate_expression(r#"
                 (function() {
+                    // 優先セレクター（aria-label / testid）
                     const selectors = [
                         'button[aria-label*="Send"]', 'button[aria-label*="送信"]',
+                        'button[aria-label*="メッセージ"]', 'button[aria-label*="message"]',
+                        'button[aria-label*="submit"]', 'button[aria-label*="Submit"]',
                         '[data-testid*="send"]', '[data-testid*="Send"]',
-                        'button[type="submit"]', 'form button:last-of-type',
+                        '[data-testid*="submit"]', '[data-testid*="Submit"]',
+                        'button[type="submit"]',
                     ];
                     for (const sel of selectors) {
                         const btn = document.querySelector(sel);
                         if (btn && !btn.disabled) { btn.click(); return 'clicked:' + sel; }
                     }
+                    // 入力欄の近くにある有効ボタンを最大3階層上まで探す
                     const inp = document.querySelector('#userInput');
                     if (inp) {
-                        const area = inp.closest('form, [role="form"], div');
-                        if (area) {
-                            for (const btn of area.querySelectorAll('button:not([disabled])')) {
-                                btn.click();
-                                return 'clicked:nearby:' + (btn.getAttribute('aria-label') || btn.getAttribute('data-testid') || 'unknown');
+                        let el = inp.parentElement;
+                        for (let depth = 0; el && depth < 5; depth++, el = el.parentElement) {
+                            const btns = [...el.querySelectorAll('button:not([disabled])')];
+                            // 入力欄より右/下にあるボタンを優先
+                            const inpRect = inp.getBoundingClientRect();
+                            for (const btn of btns) {
+                                const r = btn.getBoundingClientRect();
+                                if (r.left >= inpRect.right - 10 || r.top >= inpRect.bottom - 10) {
+                                    btn.click();
+                                    return 'clicked:nearby@' + depth + ':' + (btn.getAttribute('aria-label') || btn.getAttribute('data-testid') || btn.className.slice(0,30) || 'unknown');
+                                }
                             }
                         }
+                    }
+                    // 最終手段: form.requestSubmit() または form.submit()
+                    const form = document.querySelector('#userInput')?.closest('form');
+                    if (form) {
+                        try { form.requestSubmit(); return 'form_requestSubmit'; } catch(_) {}
+                        try { form.submit(); return 'form_submit'; } catch(_) {}
                     }
                     return 'no button found';
                 })()
