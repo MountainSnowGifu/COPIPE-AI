@@ -104,6 +104,46 @@ async fn get_commands(
     Ok(parse_blocks(&blocks))
 }
 
+/// 毎ターンのプロンプトに付加するコンテキストヘッダー。
+/// AI が「何を読んだか・何をしたか・元のタスクは何か」を忘れないようにする。
+fn build_context_header(
+    user_task: &str,
+    read_files: &std::collections::HashSet<std::path::PathBuf>,
+    root: &std::path::Path,
+    done_log: &[String],
+) -> String {
+    let mut lines = vec![format!("[元のタスク] {user_task}")];
+
+    if !read_files.is_empty() {
+        let mut files: Vec<String> = read_files
+            .iter()
+            .filter_map(|p| p.strip_prefix(root).ok())
+            .map(|p| p.display().to_string())
+            .collect();
+        files.sort();
+        lines.push(format!(
+            "[読み込み済みファイル（再読み不要）] {}",
+            files.join(", ")
+        ));
+    }
+
+    if !done_log.is_empty() {
+        // 直近 8 件だけ表示（プロンプトを膨らませすぎない）
+        let recent: Vec<&str> = done_log
+            .iter()
+            .rev()
+            .take(8)
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        lines.push(format!("[完了済みアクション] {}", recent.join(" → ")));
+    }
+
+    lines.join("\n")
+}
+
 fn summarize_for_display(label: &str, output: &str) -> String {
     if output.starts_with("```") {
         let n = output.lines().count().saturating_sub(2);
@@ -201,9 +241,14 @@ pub async fn run_agent(
             break;
         }
 
+        let ctx = build_context_header(user_task, &read_files, root, &done_log);
+
         if only_txt {
-            // txt のみで止まっている → ツールを使って作業を続けるよう促す
-            prompt = "ツールを使って作業を続けてください。ユーザーへの確認は不要です。".to_string();
+            // txt のみで止まっている → コンテキスト付きで次のアクションを促す
+            prompt = format!(
+                "{ctx}\n\n読み込み済みのファイルは再読不要です。\
+                上記の完了済みアクションを踏まえ、タスクを完了するために次に必要なツールを実行してください。"
+            );
             continue;
         }
 
@@ -228,7 +273,7 @@ pub async fn run_agent(
             break;
         }
 
-        prompt = format_tool_results(&tool_results);
+        prompt = format!("{ctx}\n\n{}", format_tool_results(&tool_results));
     }
 
     if !done_log.is_empty() {
