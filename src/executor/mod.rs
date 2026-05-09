@@ -8,11 +8,43 @@ use crate::command::AiCommand;
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const LOG_DIR: &str = ".copipe_logs";
 
-const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly"];
+const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly", "browser_log"];
+
+pub fn now_timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (h, m, s) = (secs % 86400 / 3600, secs % 3600 / 60, secs % 60);
+    // 日付は UNIX 秒から算出
+    let days = secs / 86400; // 1970-01-01 からの日数
+    let (y, mo, d) = days_to_ymd(days);
+    format!("{y:04}-{mo:02}-{d:02} {:02}:{m:02}:{s:02} UTC", h)
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut y = 1970u64;
+    loop {
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let dy = if leap { 366 } else { 365 };
+        if days < dy { break; }
+        days -= dy;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let months = [31u64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut mo = 1u64;
+    for &dm in &months {
+        if days < dm { break; }
+        days -= dm;
+        mo += 1;
+    }
+    (y, mo, days + 1)
+}
 
 pub struct ToolResult {
     pub label: String,
@@ -294,7 +326,7 @@ pub async fn execute(
                     .append(true)
                     .open(log_dir.join("cmd_log"))
                 {
-                    let entry = format!("$ {}\n{}\n---\n", cmd.join(" "), output);
+                    let entry = format!("[{}] $ {}\n{}\n---\n", now_timestamp(), cmd.join(" "), output);
                     f.write_all(entry.as_bytes()).ok();
                 }
 
@@ -307,12 +339,12 @@ pub async fn execute(
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => {
-                        if !abs.exists() {
+                        if !read_files.contains(&abs) {
+                            format!("ERROR: '{path}' は事前に read_file で読み込んでいません。patch の前に read_file で内容を確認してください。")
+                        } else if !abs.exists() {
                             format!("ERROR: '{path}' が存在しません。patch はファイルが存在する場合のみ使用できます。")
-                        } else if !read_files.contains(&abs) {
-                            format!(
-                                "ERROR: '{path}' は未読です。先に read_file で内容を確認してから patch してください。"
-                            )
+                        } else if diff.trim().is_empty() || !diff.contains("@@") {
+                            "ERROR: diff が空または形式が不正です。@@ ヘッダーを含む unified diff 形式で指定してください。\n例: \"@@ -5,3 +5,3 @@\\n context\\n-旧行\\n+新行\\n context\"".to_string()
                         } else {
                             match std::fs::read_to_string(&abs) {
                                 Err(e) => format!("ERROR: ファイル読み込み失敗: {e}"),

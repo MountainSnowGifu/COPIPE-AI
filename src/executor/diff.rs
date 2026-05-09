@@ -95,11 +95,24 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
                 let matches =
                     actual == expected.as_str() || actual.trim_end() == expected.trim_end();
                 if !matches {
+                    // 周辺行を表示して AI が正しいコンテキストを再生成しやすくする
+                    let ctx_start = old_idx.saturating_sub(2);
+                    let ctx_end = (old_idx + 3).min(lines.len());
+                    let ctx: Vec<String> = lines[ctx_start..ctx_end]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| {
+                            let lineno = ctx_start + i + 1;
+                            let marker = if lineno == old_idx + 1 { ">" } else { " " };
+                            format!("  {marker} {:3}: {l}", lineno)
+                        })
+                        .collect();
                     return Err(format!(
-                        "パッチ適用失敗: 行 {} のコンテキストが一致しません\n  期待: {:?}\n  実際: {:?}",
+                        "パッチ適用失敗: 行 {} のコンテキストが一致しません\n  期待: {:?}\n  実際: {:?}\n実ファイルの周辺行:\n{}",
                         old_idx + 1,
                         expected,
-                        actual
+                        actual,
+                        ctx.join("\n")
                     ));
                 }
                 old_idx += 1;

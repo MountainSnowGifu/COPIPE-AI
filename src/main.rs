@@ -6,6 +6,7 @@ mod session;
 
 use agent::{build_system_prompt, run_agent};
 use color::{BOLD, DIM, RESET};
+use executor::LOG_DIR;
 use session::CopilotSession;
 
 #[tokio::main]
@@ -24,6 +25,13 @@ async fn main() -> anyhow::Result<()> {
     .canonicalize()?;
 
     eprintln!("プロジェクトルート: {}", root.display());
+
+    // 起動時にログを初期化
+    let log_dir = root.join(LOG_DIR);
+    std::fs::create_dir_all(&log_dir).ok();
+    for name in &["ai_log", "cmd_log", "browser_log"] {
+        std::fs::write(log_dir.join(name), "").ok();
+    }
 
     let mut session = CopilotSession::start().await?;
     eprintln!("Copilot に接続しました。");

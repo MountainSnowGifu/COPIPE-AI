@@ -248,6 +248,25 @@ pub(crate) async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize
         .collect()
 }
 
+pub(crate) async fn page_diagnostic(page: &chromiumoxide::Page) -> String {
+    page.evaluate_expression(
+        r#"
+        (() => {
+            const text = document.body ? document.body.innerText : '';
+            return JSON.stringify({
+                url: location.href,
+                title: document.title,
+                text: text.replace(/\s+/g, ' ').slice(0, 1200)
+            });
+        })()
+    "#,
+    )
+    .await
+    .ok()
+    .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+    .unwrap_or_else(|| "{\"error\":\"page diagnostic unavailable\"}".to_string())
+}
+
 async fn wait_for_ai_message_count(
     page: &chromiumoxide::Page,
     n: usize,

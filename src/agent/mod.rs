@@ -3,8 +3,8 @@ pub use prompt::build_system_prompt;
 
 use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET};
 use crate::command::{parse_commands, AiCommand};
-use crate::executor::{execute, format_tool_results, ToolResult, LOG_DIR};
-use crate::session::{ai_message_count, get_codeblocks_from_dom, CopilotSession};
+use crate::executor::{execute, format_tool_results, now_timestamp, ToolResult, LOG_DIR};
+use crate::session::{ai_message_count, get_codeblocks_from_dom, page_diagnostic, CopilotSession};
 use std::io::Write as _;
 
 // ─── エージェントループ ────────────────────────────────────────────────────────
@@ -53,24 +53,49 @@ fn parse_blocks(blocks: &[String]) -> (Vec<crate::command::AiCommand>, Vec<Strin
 
 async fn get_commands(
     session: &mut CopilotSession,
+    root: &std::path::Path,
     prompt: &str,
 ) -> anyhow::Result<(Vec<crate::command::AiCommand>, Vec<String>)> {
-    session.send_raw(prompt).await?;
+    if let Err(e) = session.send_raw(prompt).await {
+        write_browser_log(root, &format!("send_raw error: {e}"), session).await;
+        return Err(e);
+    }
     let n = ai_message_count(&session.page).await?;
     let blocks = get_codeblocks_from_dom(&session.page, n).await;
 
     if blocks.is_empty() {
         eprintln!("JSON ブロックなし → 再要求します");
-        session.send_raw(
+        write_browser_log(root, "no JSON code block in latest AI message", session).await;
+        if let Err(e) = session.send_raw(
             "次の作業ステップを JSON スキーマ形式で記述してください。\
             例：\n```json\n{\"type\": \"list_dir\", \"path\": \".\"}\n```"
-        ).await?;
+        ).await {
+            write_browser_log(root, &format!("retry send_raw error: {e}"), session).await;
+            return Err(e);
+        }
         let n2 = ai_message_count(&session.page).await?;
         let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
+        if blocks2.is_empty() {
+            write_browser_log(root, "still no JSON code block after retry", session).await;
+        }
         return Ok(parse_blocks(&blocks2));
     }
 
     Ok(parse_blocks(&blocks))
+}
+
+async fn write_browser_log(root: &std::path::Path, reason: &str, session: &CopilotSession) {
+    let log_dir = root.join(LOG_DIR);
+    std::fs::create_dir_all(&log_dir).ok();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("browser_log"))
+    {
+        let diag = page_diagnostic(&session.page).await;
+        let entry = format!("[{}] {reason}\n{diag}\n---\n", now_timestamp());
+        f.write_all(entry.as_bytes()).ok();
+    }
 }
 
 /// 毎ターンのプロンプトに付加するコンテキストヘッダー。
@@ -123,10 +148,11 @@ fn summarize_for_display(label: &str, output: &str) -> String {
         return format!("{n}エントリ");
     }
     let first = output.lines().next().unwrap_or("").trim();
-    if first.len() > 120 {
-        format!("{}…", &first[..120])
+    let chars: String = first.chars().take(120).collect();
+    if first.chars().count() > 120 {
+        format!("{chars}…")
     } else {
-        first.to_string()
+        chars
     }
 }
 
@@ -142,10 +168,11 @@ pub async fn run_agent(
     let mut read_files = std::collections::HashSet::new();
     let mut done_log: Vec<String> = Vec::new();
     let mut reached_max = false;
+    let mut consecutive_txt = 0u32;
 
     for turn in 0..MAX_TURNS {
         eprintln!("{DIM}[ターン {}/{}]{RESET}", turn + 1, MAX_TURNS);
-        let (commands, parse_errors) = get_commands(session, &prompt).await?;
+        let (commands, parse_errors) = get_commands(session, root, &prompt).await?;
 
         // ai_log にこのターンの命令を記録
         {
@@ -156,7 +183,7 @@ pub async fn run_agent(
                 .append(true)
                 .open(log_dir.join("ai_log"))
             {
-                let mut entry = format!("=== ターン {} ===\n", turn + 1);
+                let mut entry = format!("=== ターン {} [{}] ===\n", turn + 1, now_timestamp());
                 for cmd in &commands {
                     entry.push_str(&format!(
                         "{}\n",
@@ -217,12 +244,31 @@ pub async fn run_agent(
         let ctx = build_context_header(user_task, &read_files, root, &done_log);
 
         if only_txt {
-            prompt = format!(
-                "{ctx}\n\n読み込み済みのファイルは再読不要です。\
-                上記の完了済みアクションを踏まえ、タスクを完了するために次に必要なツールを実行してください。"
-            );
+            consecutive_txt += 1;
+            let file_hint = if read_files.is_empty() {
+                "まだファイルを読み込んでいません。read_file コマンドでファイルを読んでください。".to_string()
+            } else {
+                let mut files: Vec<String> = read_files
+                    .iter()
+                    .filter_map(|p| p.strip_prefix(root).ok())
+                    .map(|p| p.display().to_string())
+                    .collect();
+                files.sort();
+                format!("読み込み済みのファイル（再読不要）: {}。", files.join(", "))
+            };
+            // txt が続きすぎる場合は強制的に bot で回答させる
+            let action_hint = if consecutive_txt >= 2 {
+                "\n今すぐ `bot` コマンドで回答を出力してください。省略せず完全な内容を含めること。\
+                \n```json\n{\"type\": \"bot\", \"message\": \"（完全な回答をここに）\"}\n```"
+            } else {
+                "\nタスクが完了していれば `bot` コマンドで完全な回答を返してください（省略不可）：\
+                \n```json\n{\"type\": \"bot\", \"message\": \"（完全な回答をここに）\"}\n```\
+                \nまだ必要なツールがあれば read_file / list_dir / cmd などを実行してください。"
+            };
+            prompt = format!("{ctx}\n\n{file_hint}{action_hint}");
             continue;
         }
+        consecutive_txt = 0;
 
         if tool_results.is_empty() {
             break;
