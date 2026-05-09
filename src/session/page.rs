@@ -158,6 +158,40 @@ try {
         return _getParam2.call(this, p);
     };
 } catch(_) {}
+
+// CDP の Function.prototype.toString() 偽装除去
+// CDP は関数を wrap するため toString() で "native code" でない実装が露出する場合がある
+try {
+    const _toString = Function.prototype.toString;
+    Function.prototype.toString = function() {
+        if (this === Function.prototype.toString) return 'function toString() { [native code] }';
+        return _toString.call(this);
+    };
+} catch(_) {}
+
+// Notification.permission を denied に（実際のブラウザと同様）
+try {
+    if (window.Notification) {
+        Object.defineProperty(Notification, 'permission', { get: () => 'denied' });
+    }
+} catch(_) {}
+
+// performance.now() にわずかなノイズを乗せてフィンガープリントを揺らす
+try {
+    const _perfNow = Performance.prototype.now;
+    Performance.prototype.now = function() {
+        return _perfNow.call(this) + (Math.random() * 0.1);
+    };
+} catch(_) {}
+
+// CDP が追加する runtime 関連プロパティを削除
+try {
+    for (const key of Object.getOwnPropertyNames(window)) {
+        if (key.startsWith('cdc_') || key.startsWith('__cdc_') || key.startsWith('chrome_')) {
+            try { delete window[key]; } catch(_) {}
+        }
+    }
+} catch(_) {}
 "#;
 
 fn user_agent_metadata() -> anyhow::Result<UserAgentMetadata> {
@@ -184,21 +218,24 @@ fn user_agent_metadata() -> anyhow::Result<UserAgentMetadata> {
 }
 
 pub(super) async fn get_ws_url(port: u16) -> anyhow::Result<String> {
+    use std::io::Write as _;
     let url = format!("http://127.0.0.1:{port}/json/version");
-    eprintln!("CDP 接続を待機中 (最大15秒)...");
     for i in 0..30 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if i > 0 && i % 6 == 0 {
-            eprintln!("  CDP 待機中... ({}秒経過)", i / 2);
-        }
+        let secs = (i + 1) / 2;
+        print!("\r  ブラウザ接続中... {secs}s          ");
+        std::io::stdout().flush().ok();
         if let Ok(resp) = reqwest::get(&url).await {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(ws) = json["webSocketDebuggerUrl"].as_str() {
+                    print!("\r                                      \r");
+                    std::io::stdout().flush().ok();
                     return Ok(ws.to_string());
                 }
             }
         }
     }
+    println!();
     anyhow::bail!("Edge の CDP に接続できませんでした (port {port})")
 }
 
@@ -269,20 +306,42 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
     )
     .await?;
     page.execute(AddScriptToEvaluateOnNewDocumentParams::new(ANTI_BOT_JS)).await?;
-    eprintln!("Copilot ページを開いています...");
+    use std::io::Write as _;
     page.goto("https://copilot.microsoft.com").await?;
-    eprintln!("ページ初期化を待機中 (5秒)...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    eprintln!("入力欄を待機中 (最大20秒)...");
-    if let Err(e) = wait_for_element(&page, "#userInput", 20).await {
+    for s in 1..=5u64 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        print!("\r  ページ初期化中... {s}/5s          ");
+        std::io::stdout().flush().ok();
+    }
+    print!("\r                                   \r");
+    std::io::stdout().flush().ok();
+
+    // 入力欄を待機。見つからない場合は BOT チャレンジを確認してユーザーに回復を促す
+    if let Err(_) = wait_for_element(&page, "#userInput", 20).await {
         let diag = page_diagnostic(&page).await;
         if looks_like_bot_challenge(&diag) {
-            anyhow::bail!(
-                "Copilot の入力欄が見つかりません。BOT対策/ログイン/チャレンジ画面の可能性があります。\n診断: {diag}"
-            );
+            println!();
+            println!("⚠ ログイン/チャレンジ画面が検出されました。");
+            println!("  ブラウザでログインまたは確認を完了してから Enter を押してください...");
+            println!("  （120秒後に自動タイムアウトします）");
+            std::io::stdout().flush().ok();
+            // spawn_blocking + timeout で stdin を非同期安全に待機
+            let wait_result = tokio::time::timeout(
+                Duration::from_secs(120),
+                tokio::task::spawn_blocking(|| {
+                    let mut buf = String::new();
+                    std::io::stdin().read_line(&mut buf).ok();
+                }),
+            ).await;
+            if wait_result.is_err() {
+                anyhow::bail!("ログイン待機がタイムアウトしました（120秒）。再実行してください");
+            }
+            // 再待機（最大60秒）
+            wait_for_element(&page, "#userInput", 60).await
+                .map_err(|_| anyhow::anyhow!("ログイン後も入力欄が見つかりませんでした。ブラウザを確認してください"))?;
+        } else {
+            anyhow::bail!("Copilot の入力欄が見つかりません。ブラウザを確認してください");
         }
-        return Err(e);
     }
-    eprintln!("入力欄を検出しました。");
     Ok(page)
 }

@@ -62,6 +62,7 @@ pub struct CopilotSession {
     pub(crate) page: chromiumoxide::Page,
     edge: Child,
     handle: tokio::task::JoinHandle<()>,
+    pub(crate) log_dir: Option<std::path::PathBuf>,
 }
 
 impl Drop for CopilotSession {
@@ -78,7 +79,7 @@ impl CopilotSession {
         let mut edge = launch_edge(port)?;
         let result = Self::init(port, &mut edge).await;
         match result {
-            Ok((page, handle)) => Ok(Self { page, edge, handle }),
+            Ok((page, handle)) => Ok(Self { page, edge, handle, log_dir: None }),
             Err(e) => {
                 edge.kill().ok();
                 edge.wait().ok();
@@ -137,56 +138,89 @@ impl CopilotSession {
 
         wait_for_element(page, "#userInput", 10).await?;
         scroll_to_selector(page, "#userInput").await;
-        tokio::time::sleep(jitter(600, 400)).await;
+        tokio::time::sleep(jitter(700, 500)).await;
 
-        // マウス移動 + クリックでフォーカス（JS focus() より自然な操作に見せる）
+        // Bézier 曲線軌跡でマウスを入力欄に移動してクリック
         page.evaluate_expression(r#"
             (function() {
                 const el = document.querySelector('#userInput');
                 if (!el) return;
                 const r = el.getBoundingClientRect();
-                const x = r.left + r.width  * 0.4 + Math.random() * r.width  * 0.2;
-                const y = r.top  + r.height * 0.4 + Math.random() * r.height * 0.2;
-                const mo = {bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0};
-                el.dispatchEvent(new MouseEvent('mousemove', mo));
+                const tx = r.left + r.width  * (0.35 + Math.random() * 0.3);
+                const ty = r.top  + r.height * (0.35 + Math.random() * 0.3);
+                // 現在のマウス位置の推定（画面中央付近 + ノイズ）
+                const sx = window.innerWidth  * (0.3 + Math.random() * 0.4);
+                const sy = window.innerHeight * (0.3 + Math.random() * 0.4);
+                // Bézier 制御点（軌跡に自然な弧を作る）
+                const cx = sx + (tx - sx) * (0.3 + Math.random() * 0.4) + (Math.random() - 0.5) * 120;
+                const cy = sy + (ty - sy) * (0.3 + Math.random() * 0.4) + (Math.random() - 0.5) * 80;
+                const steps = 12 + Math.floor(Math.random() * 8);
+                for (let i = 0; i <= steps; i++) {
+                    const t = i / steps;
+                    const u = 1 - t;
+                    const mx = u*u*sx + 2*u*t*cx + t*t*tx;
+                    const my = u*u*sy + 2*u*t*cy + t*t*ty;
+                    el.dispatchEvent(new MouseEvent('mousemove', {bubbles:true, clientX:mx, clientY:my}));
+                }
+                const mo = {bubbles:true, cancelable:true, clientX:tx, clientY:ty, button:0};
                 el.dispatchEvent(new MouseEvent('mousedown', mo));
                 el.dispatchEvent(new MouseEvent('mouseup',   mo));
                 el.dispatchEvent(new MouseEvent('click',     mo));
                 el.focus();
             })()
         "#).await?;
-        tokio::time::sleep(jitter(500, 400)).await;
+        tokio::time::sleep(jitter(600, 400)).await;
 
-        // テキストを React の value setter 経由でセット
+        // テキスト入力: ClipboardEvent(DataTransfer) でペースト擬似
+        // React setter より自然で bot 検知を回避しやすい
         let js_str = serde_json::to_string(prompt)?;
         page.evaluate_expression(&format!(r#"
             (function() {{
                 const el = document.querySelector('#userInput');
                 if (!el) return 'not found';
+                // 方法1: DataTransfer ペースト（最も自然）
+                try {{
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', {js_str});
+                    el.dispatchEvent(new ClipboardEvent('paste', {{
+                        bubbles: true, cancelable: true, clipboardData: dt
+                    }}));
+                    if (el.value && el.value.length > 0) return 'paste_ok';
+                }} catch(_) {{}}
+                // 方法2: execCommand（DataTransfer 非対応環境向け）
+                try {{
+                    el.focus();
+                    el.select();
+                    if (document.execCommand('insertText', false, {js_str})) return 'execCommand_ok';
+                }} catch(_) {{}}
+                // 方法3: React setter フォールバック
                 const setter = Object.getOwnPropertyDescriptor(
                     window.HTMLTextAreaElement.prototype, 'value'
                 ).set;
                 setter.call(el, {js_str});
                 el.dispatchEvent(new Event('input',  {{bubbles: true}}));
                 el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                return 'ok';
+                return 'setter_fallback';
             }})()
         "#)).await?;
-        tokio::time::sleep(jitter(800, 600)).await;
+        tokio::time::sleep(jitter(900, 700)).await;
 
-        // Enter キー送信
+        // Enter キー（Shift/Alt/Ctrl なし、より自然なイベントオブジェクト）
         page.evaluate_expression(r#"
             (function() {
                 const el = document.querySelector('#userInput');
                 if (!el) return;
-                const ko = {key:'Enter', code:'Enter', keyCode:13, which:13, charCode:13,
-                            bubbles:true, cancelable:true};
-                el.dispatchEvent(new KeyboardEvent('keydown',  ko));
-                el.dispatchEvent(new KeyboardEvent('keypress', ko));
-                el.dispatchEvent(new KeyboardEvent('keyup',    ko));
+                const base = {
+                    key:'Enter', code:'Enter', keyCode:13, which:13, charCode:0,
+                    bubbles:true, cancelable:true, composed:true,
+                    shiftKey:false, altKey:false, ctrlKey:false, metaKey:false
+                };
+                el.dispatchEvent(new KeyboardEvent('keydown',  base));
+                el.dispatchEvent(new KeyboardEvent('keypress', {...base, charCode:13}));
+                el.dispatchEvent(new KeyboardEvent('keyup',    base));
             })()
         "#).await?;
-        tokio::time::sleep(jitter(300, 200)).await;
+        tokio::time::sleep(jitter(400, 250)).await;
 
         // 入力欄がまだ空でなければ送信ボタンをフォールバッククリック（二重送信防止）
         let target = baseline + 1;
@@ -223,18 +257,19 @@ impl CopilotSession {
             "#).await.ok()
                 .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
                 .unwrap_or_default();
-            // フォールバック詳細はファイルのみ（端末には出さない）
-            if let Ok(log_dir) = std::env::current_dir().map(|d| d.join(".copipe_logs")) {
+            // フォールバック詳細はログファイルのみ（端末には出さない）
+            if let Some(ref ld) = self.log_dir {
                 use std::io::Write as IoWrite;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("browser_log")) {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ld.join("browser_log")) {
                     let _ = writeln!(f, "[送信フォールバック] {click_result}\n---");
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        wait_for_ai_message_count(page, target, 90).await?;
-        wait_for_stable_text(page, target, 90).await?;
+        let log_dir_ref = self.log_dir.as_deref();
+        wait_for_ai_message_count(page, target, 90, log_dir_ref).await?;
+        wait_for_stable_text(page, target, 90, log_dir_ref).await?;
         scroll_to_nth_ai_message(page, target).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(())

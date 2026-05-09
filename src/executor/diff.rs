@@ -1,5 +1,5 @@
 /// `@@ -old_start[,old_count] +new_start[,new_count] @@` をパースして
-/// (old_start_1indexed, old_line_count) を返す。
+/// (old_start_1indexed, declared_old_count) を返す。
 /// 行番号が省略された `@@` の場合は (0, 0) を返す（コンテキスト検索で補完する）。
 fn parse_hunk_header(line: &str) -> Result<(usize, usize), String> {
     let inner = line
@@ -77,7 +77,7 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
             continue;
         }
 
-        let (old_start, _) = parse_hunk_header(dl)?;
+        let (old_start, declared_old_count) = parse_hunk_header(dl)?;
         di += 1;
 
         // ハンク行を収集（次の @@ または末尾まで）
@@ -105,6 +105,14 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
             .iter()
             .filter(|(m, _)| matches!(m, ' ' | '-'))
             .count();
+
+        // ハンクヘッダーの行数宣言と実際のハンク内容が矛盾する場合は拒否
+        // old_count == 0 は行番号省略の @@ なので検証をスキップ
+        if declared_old_count > 0 && old_count != declared_old_count {
+            return Err(format!(
+                "diff ヘッダーの行数宣言 ({declared_old_count}) と実際のハンク内容 ({old_count} 行) が一致しません"
+            ));
+        }
 
         // old_start == 0 は行番号省略の @@ → コンテキスト検索で位置を特定
         let apply_at = if old_start == 0 {

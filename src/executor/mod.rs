@@ -14,16 +14,38 @@ pub const LOG_DIR: &str = ".copipe_logs";
 
 const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly", "browser_log"];
 
+/// ログファイルへの安全な追記（symlink なら書き込まない）
+pub fn safe_append_log(path: &Path, content: &str) {
+    if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return; // symlink は無視
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(content.as_bytes());
+    }
+}
+
 pub fn now_timestamp() -> String {
-    let secs = SystemTime::now()
+    // TZ 環境変数があればオフセット参照、なければ JST(+9) をデフォルト
+    let offset_hours: i64 = std::env::var("TZ")
+        .ok()
+        .and_then(|tz| {
+            // "Asia/Tokyo" → +9, UTC → 0, etc. を簡易判定
+            if tz.contains("Tokyo") || tz.contains("JST") { Some(9) }
+            else if tz == "UTC" || tz == "GMT" { Some(0) }
+            else { None }
+        })
+        .unwrap_or(9); // デフォルト JST
+
+    let utc_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let (h, m, s) = (secs % 86400 / 3600, secs % 3600 / 60, secs % 60);
-    // 日付は UNIX 秒から算出
-    let days = secs / 86400; // 1970-01-01 からの日数
+        .as_secs() as i64;
+    let local_secs = (utc_secs + offset_hours * 3600) as u64;
+    let (h, m, s) = (local_secs % 86400 / 3600, local_secs % 3600 / 60, local_secs % 60);
+    let days = local_secs / 86400;
     let (y, mo, d) = days_to_ymd(days);
-    format!("{y:04}-{mo:02}-{d:02} {:02}:{m:02}:{s:02} UTC", h)
+    let tz_label = if offset_hours == 9 { "JST" } else { "UTC" };
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02} {tz_label}")
 }
 
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
@@ -116,19 +138,23 @@ pub async fn execute(
 ) -> (Vec<ToolResult>, Vec<String>) {
     let mut results = Vec::new();
     let mut messages = Vec::new();
-    let mut read_file_done = false;
+    // 1ターンあたりの read_file 合計文字数上限
+    // 複数の小ファイルは1ターンで読める・大きいファイルは1ファイルでも制限に当たる
+    const MAX_TURN_READ_CHARS: usize = 7_000;
+    let mut turn_read_chars = 0usize;
 
     for cmd in commands {
         match cmd {
             AiCommand::ReadFile { path, offset_lines } => {
-                if read_file_done {
+                if turn_read_chars >= MAX_TURN_READ_CHARS {
                     results.push(ToolResult {
                         label: format!("ReadFile({path})"),
-                        output: "ERROR: read_file は1ターンに1ファイルのみ使えます。次のターンで残りのファイルを読んでください。".to_string(),
+                        output: format!(
+                            "このターンの読み込みバジェット ({MAX_TURN_READ_CHARS} 文字) を超えました。次のターンで読んでください。"
+                        ),
                     });
                     continue;
                 }
-                read_file_done = true;
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => match std::fs::read_to_string(&abs) {
@@ -148,7 +174,8 @@ pub async fn execute(
                         }
                         Ok(content) => {
                             read_files.insert(abs);
-                            const MAX_FILE_CHARS: usize = 8_000;
+                            // ターン内残バジェットを考慮した上限（ファイル個別上限も兼ねる）
+                            let budget = MAX_TURN_READ_CHARS.saturating_sub(turn_read_chars).min(8_000);
                             let total_lines = content.lines().count();
                             let sliced: String = if *offset_lines > 0 {
                                 content.lines().skip(*offset_lines).collect::<Vec<_>>().join("\n")
@@ -156,8 +183,8 @@ pub async fn execute(
                                 content.clone()
                             };
                             let sliced_lines = total_lines.saturating_sub(*offset_lines);
-                            if sliced.chars().count() > MAX_FILE_CHARS {
-                                let truncated: String = sliced.chars().take(MAX_FILE_CHARS).collect();
+                            let out = if sliced.chars().count() > budget {
+                                let truncated: String = sliced.chars().take(budget).collect();
                                 let shown_lines = truncated.lines().count();
                                 let remaining = sliced_lines.saturating_sub(shown_lines);
                                 let next_offset = offset_lines + shown_lines;
@@ -166,13 +193,19 @@ pub async fn execute(
                                 format!("```\n{sliced}\n```\n[{offset_lines} 行目以降を表示（全 {total_lines} 行）]")
                             } else {
                                 format!("```\n{sliced}\n```")
-                            }
+                            };
+                            turn_read_chars += out.chars().count();
+                            out
                         }
                         Err(e) => format!("ERROR: {e}"),
                     },
                 };
                 results.push(ToolResult {
-                    label: format!("ReadFile({path}@{offset_lines})"),
+                    label: if *offset_lines == 0 {
+                        format!("ReadFile({path})")
+                    } else {
+                        format!("ReadFile({path}@{offset_lines})")
+                    },
                     output,
                 });
             }
@@ -207,7 +240,10 @@ pub async fn execute(
                 let output = match resolve(root, path) {
                     Err(e) => format!("ERROR: {e}"),
                     Ok(abs) => {
-                        if abs.exists() && !read_files.contains(&abs) {
+                        // dangling symlink（exists()=false だが symlink は存在）を拒否
+                        if abs.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                            format!("ERROR: '{path}' はシンボリックリンクです。書き込みを拒否しました")
+                        } else if abs.exists() && !read_files.contains(&abs) {
                             format!(
                                 "ERROR: '{path}' は未読です。先に read_file で内容を確認してから上書きしてください。"
                             )
@@ -350,17 +386,11 @@ pub async fn execute(
                     }
                 };
 
-                // cmd_log に追記
+                // cmd_log に追記（symlink チェック付き）
                 let log_dir = root.join(LOG_DIR);
                 std::fs::create_dir_all(&log_dir).ok();
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_dir.join("cmd_log"))
-                {
-                    let entry = format!("[{}] $ {}\n{}\n---\n", now_timestamp(), cmd.join(" "), output);
-                    f.write_all(entry.as_bytes()).ok();
-                }
+                let entry = format!("[{}] $ {}\n{}\n---\n", now_timestamp(), cmd.join(" "), output);
+                safe_append_log(&log_dir.join("cmd_log"), &entry);
 
                 results.push(ToolResult {
                     label: format!("Cmd({name})"),
@@ -400,6 +430,7 @@ pub async fn execute(
                 });
             }
             AiCommand::ReadLog { filename } => {
+                const MAX_LOG_BYTES: u64 = 32 * 1024; // 末尾 32KB のみ返す
                 let output = if !ALLOWED_LOGS.contains(&filename.as_str()) {
                     format!(
                         "ERROR: 不正なログ名 '{filename}'。使用可能: {}",
@@ -407,13 +438,24 @@ pub async fn execute(
                     )
                 } else {
                     let log_path = root.join(LOG_DIR).join(filename);
-                    match std::fs::read_to_string(&log_path) {
-                        Ok(s) if s.is_empty() => "(ログは空です)".to_string(),
-                        Ok(s) => s,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            "(ログファイルが存在しません)".to_string()
+                    // シンボリックリンク経由のルート外読み取りを拒否
+                    if log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                        format!("ERROR: '{filename}' はシンボリックリンクです。読み取りを拒否しました")
+                    } else {
+                        match std::fs::read(&log_path) {
+                            Ok(bytes) if bytes.is_empty() => "(ログは空です)".to_string(),
+                            Ok(bytes) => {
+                                // サイズ制限: 末尾 32KB のみ
+                                let start = bytes.len().saturating_sub(MAX_LOG_BYTES as usize);
+                                let slice = &bytes[start..];
+                                let prefix = if start > 0 { "[先頭部分省略]\n" } else { "" };
+                                format!("{prefix}{}", String::from_utf8_lossy(slice))
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                "(ログファイルが存在しません)".to_string()
+                            }
+                            Err(e) => format!("ERROR: {e}"),
                         }
-                        Err(e) => format!("ERROR: {e}"),
                     }
                 };
                 results.push(ToolResult {

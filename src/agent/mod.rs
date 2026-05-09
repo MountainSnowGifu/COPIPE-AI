@@ -1,7 +1,7 @@
 mod prompt;
 pub use prompt::build_system_prompt;
 
-use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET};
+use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET, YELLOW};
 use crate::command::{parse_commands, AiCommand};
 use crate::executor::{execute, format_tool_results, now_timestamp, ToolResult, LOG_DIR};
 use crate::session::{ai_message_count, get_codeblocks_from_dom, page_diagnostic, CopilotSession};
@@ -153,10 +153,15 @@ async fn get_commands(
 async fn write_browser_log(root: &std::path::Path, reason: &str, session: &CopilotSession) {
     let log_dir = root.join(LOG_DIR);
     std::fs::create_dir_all(&log_dir).ok();
+    let log_path = log_dir.join("browser_log");
+    // symlink チェック（ディレクトリ自体は起動時に確認済み、ファイル単体も確認）
+    if log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return;
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_dir.join("browser_log"))
+        .open(&log_path)
     {
         let header = format!("[{}] {reason}\n", now_timestamp());
         f.write_all(header.as_bytes()).ok();
@@ -241,6 +246,7 @@ pub async fn run_agent(
     let mut done_log: Vec<String> = Vec::new();
     let mut reached_max = false;
     let mut consecutive_txt = 0u32;
+    let mut parse_error_count = 0u32;
 
     for turn in 0..MAX_TURNS {
         // ターン間に人間らしいランダム待機（bot 検知回避）
@@ -249,11 +255,32 @@ pub async fn run_agent(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0) as u64;
-            let wait_ms = 2_000 + seed % 3_000; // 2〜5 秒
+            // 基本: 2〜5秒。10ターンに1回程度、8〜14秒の「読んでいる」長停止
+            let wait_ms = if seed % 10 == 0 {
+                8_000 + seed % 6_000
+            } else {
+                2_000 + seed % 3_000
+            };
             if verbose {
-                eprintln!("{DIM}待機 {wait_ms}ms...{RESET}");
+                let wait_secs = wait_ms as f64 / 1000.0;
+                eprintln!("{DIM}待機 {wait_secs:.1}秒...{RESET}");
+            } else {
+                // 非verbose でも待機中であることを示すドット表示
+                use std::io::Write as _;
+                let dot_count = ((wait_ms / 1000) as usize).min(5);
+                let dots = ".".repeat(dot_count);
+                print!("{DIM}{dots}{RESET}");
+                std::io::stdout().flush().ok();
             }
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            if !verbose {
+                use std::io::Write as _;
+                // ドット数と同じ幅のスペースで上書きして消去
+                let dot_count = ((wait_ms / 1000) as usize).min(5);
+                let clear = " ".repeat(dot_count);
+                print!("\r{clear}\r");
+                std::io::stdout().flush().ok();
+            }
         }
         println!("{DIM}● ステップ {}/{}{RESET}", turn + 1, MAX_TURNS);
         let (commands, parse_errors) = get_commands(session, root, &prompt, verbose).await?;
@@ -291,8 +318,13 @@ pub async fn run_agent(
             .collect();
 
         if commands.is_empty() && tool_results.is_empty() {
-            use crate::color::YELLOW;
-            println!("{YELLOW}応答からコマンドを取得できませんでした。タスクを再入力してください。{RESET}");
+            parse_error_count += 1;
+            let hint = if parse_error_count >= 2 {
+                "\n  ヒント: タスクをより具体的に書くか、短い指示（例: list_dir src）から始めてみてください"
+            } else {
+                ""
+            };
+            println!("{YELLOW}応答からコマンドを取得できませんでした。タスクを再入力してください。{hint}{RESET}");
             return Ok(false);
         }
 
@@ -361,7 +393,6 @@ pub async fn run_agent(
 
         for r in &tool_results {
             if r.label == "ParseError" {
-                // ParseError は verbose 時のみ、通常は browser_log へ記録して非表示
                 if verbose {
                     println!("  {RED_BOLD}[ParseError]{RESET} JSON パース失敗（詳細は browser_log）");
                 }
@@ -378,6 +409,16 @@ pub async fn run_agent(
                     r.label,
                     summarize_for_display(&r.label, &r.output)
                 );
+            }
+        }
+
+        // #9: 複数ファイル read が必要な場合に verbose で補足
+        if verbose {
+            let multi_reads: Vec<_> = commands.iter()
+                .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
+                .collect();
+            if multi_reads.len() > 1 {
+                println!("  {DIM}複数ファイル読み込みのため複数ターンを使用します{RESET}");
             }
         }
 
@@ -401,6 +442,18 @@ pub async fn run_agent(
                 println!("  {GREEN}{item}{RESET}");
             } else {
                 println!("  {RED}{item}{RESET}");
+            }
+        }
+    }
+
+    // #3: MAX_TURNS 到達時は正確な情報を提示
+    if reached_max {
+        println!("\n{YELLOW}最大ターン数 ({MAX_TURNS}) に達しました。{RESET}");
+        println!("{DIM}※ タスクを再入力しても読み込み済みファイルの記録はリセットされます。{RESET}");
+        if !done_log.is_empty() {
+            println!("{DIM}  続行する場合は以下の完了済み作業を踏まえてタスクを絞り込んでください:{RESET}");
+            for item in done_log.iter().filter(|i| i.starts_with('✓')).take(5) {
+                println!("{DIM}    {item}{RESET}");
             }
         }
     }

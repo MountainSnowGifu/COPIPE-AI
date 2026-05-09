@@ -1,7 +1,8 @@
 /// 実行を許可するコマンド名（allowlist 方式）
 /// mv / cp / touch は file/patch/mkdir で代替できるため除外
+/// env / make はサブコマンド経由で任意実行になり得るため除外
 pub const ALLOWED_EXECUTABLES: &[&str] = &[
-    // Rust toolchain
+    // Rust toolchain（サブコマンドは ALLOWED_CARGO_SUBCMDS で制限）
     "cargo", "rustc", "rustfmt",
     // バージョン管理（読み取り系のみ。書き込み系は ALLOWED_GIT_SUBCMDS で制限）
     "git",
@@ -9,8 +10,8 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
     // テキスト処理（sed は -i を別途ブロック）
     "sort", "uniq", "tr", "cut", "awk", "sed", "jq",
-    // 情報表示
-    "echo", "printf", "date", "env",
+    // 情報表示（引数ゼロ限定。環境変数表示のみ）
+    "echo", "printf", "date",
 ];
 
 /// git で許可する読み取り系サブコマンド（それ以外はすべて拒否）
@@ -19,6 +20,16 @@ const ALLOWED_GIT_SUBCMDS: &[&str] = &[
     "describe", "branch", "tag", "grep", "rev-parse", "cat-file",
     "shortlog", "reflog",
 ];
+
+/// cargo で許可するサブコマンド（コード実行を伴わないもの）
+/// run / test / bench / fix はビルドスクリプト・proc macro・テストバイナリ経由で
+/// 任意コードを実行できるため除外
+const ALLOWED_CARGO_SUBCMDS: &[&str] = &[
+    "build", "check", "fmt", "clippy", "doc", "clean",
+];
+
+/// cargo で明示的に拒否するサブコマンド（任意コード実行の恐れ）
+const BLOCKED_CARGO_SUBCMDS: &[&str] = &["run", "test", "bench", "fix", "install", "publish"];
 
 /// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
 const BLOCKED_ARGS: &[(&str, &[&str])] = &[
@@ -67,6 +78,34 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
                 "アクセス拒否: 'git {subcmd}' は許可されていません。許可サブコマンド: {}",
                 ALLOWED_GIT_SUBCMDS.join(", ")
             ));
+        }
+    }
+
+    // cargo はサブコマンドを制限（ビルドスクリプト/proc macro 経由の任意実行を抑制）
+    if basename == "cargo" {
+        let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
+        if BLOCKED_CARGO_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "アクセス拒否: 'cargo {subcmd}' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です"
+            ));
+        }
+        if !ALLOWED_CARGO_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "アクセス拒否: 'cargo {subcmd}' は許可されていません。許可サブコマンド: {}",
+                ALLOWED_CARGO_SUBCMDS.join(", ")
+            ));
+        }
+    }
+
+    // date / echo / printf は引数なし（または安全な書式フラグのみ）を許可
+    // 引数に実行可能なコマンド名が渡される可能性は低いが、念のためシェル特殊文字を拒否
+    if matches!(basename, "date" | "echo" | "printf") {
+        for arg in &cmd[1..] {
+            if arg.contains('$') || arg.contains('`') || arg.contains(';') {
+                return Err(format!(
+                    "アクセス拒否: '{basename}' の引数にシェル特殊文字が含まれています: '{arg}'"
+                ));
+            }
         }
     }
 

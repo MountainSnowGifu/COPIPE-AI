@@ -5,7 +5,7 @@ mod executor;
 mod session;
 
 use agent::{build_system_prompt, run_agent};
-use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW};
+use color::{use_unicode, BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW};
 use executor::LOG_DIR;
 use session::CopilotSession;
 
@@ -17,10 +17,16 @@ fn print_help() {
     println!("  終了: {BOLD}exit{RESET} / {BOLD}quit{RESET} / {BOLD}Ctrl+D{RESET}");
     println!();
     println!("{BOLD}コマンド{RESET}");
-    println!("  {BOLD}:h{RESET}   このヘルプを表示");
-    println!("  {BOLD}:v{RESET}   verbose モードを切替（ツール出力を詳しく表示）");
-    println!("  {BOLD}:y{RESET}   確認スキップモードを切替（毎回の Y/n を省略）");
-    println!("  タスク末尾に {BOLD}:y{RESET} で1回だけ確認スキップ  例: コードレビューして:y");
+    println!("  {BOLD}:h{RESET}          このヘルプを表示");
+    println!("  {BOLD}:v{RESET}          verbose モードを切替（ツール出力を詳しく表示）");
+    println!("  {BOLD}:y{RESET}          確認スキップモードをトグル（常時 on/off）");
+    println!("  タスク末尾 {BOLD}:y{RESET}  そのタスクだけ確認スキップ  例: レビューして:y");
+    println!("  {DIM}※ :y トグルとタスク末尾 :y は独立した機能です{RESET}");
+    println!();
+    println!("{BOLD}動作要件{RESET}");
+    println!("  ブラウザ: Microsoft Edge または Google Chrome が必要");
+    println!("  {DIM}COPIPE_BROWSER_PATH 環境変数でブラウザパスを上書き可能{RESET}");
+    println!("  Copilot へのログイン済みセッションが必要（初回は手動ログイン）");
     println!();
     println!("{DIM}タスク例:{RESET}");
     println!("{DIM}  src ディレクトリの構成を調べてください{RESET}");
@@ -49,25 +55,44 @@ async fn main() -> anyhow::Result<()> {
     }
     .canonicalize()?;
 
-    // 起動時にログを初期化
+    // 起動時にログを初期化（シンボリックリンク経由のルート外書き込みを防ぐ）
     let log_dir = root.join(LOG_DIR);
+    // .copipe_logs ディレクトリ自体が symlink の場合は起動を拒否
+    if log_dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        anyhow::bail!(
+            "{} はシンボリックリンクです。untrusted リポジトリによるログ外部書き込みを防ぐため起動を中止します。",
+            log_dir.display()
+        );
+    }
     std::fs::create_dir_all(&log_dir).ok();
     for name in &["ai_log", "cmd_log", "browser_log"] {
-        std::fs::write(log_dir.join(name), "").ok();
+        let log_path = log_dir.join(name);
+        if log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            eprintln!("警告: {} はシンボリックリンクのため初期化をスキップしました", log_path.display());
+            continue;
+        }
+        std::fs::write(&log_path, "").ok();
     }
 
     println!("{DIM}ブラウザを起動中...{RESET}");
     let mut session = CopilotSession::start().await?;
+    session.log_dir = Some(log_dir.clone());
     println!("{GREEN_BOLD}✓{RESET} Copilot に接続しました");
 
     println!("{DIM}初期化中...{RESET}");
     session.send_raw(&build_system_prompt(&root)).await?;
     println!("{GREEN_BOLD}✓{RESET} 準備完了\n");
 
-    // バナー（全角混在を避けるため ASCII ボックスで固定幅）
-    println!("{CYAN_BOLD}+--------------------------------------------------+{RESET}");
-    println!("{CYAN_BOLD}|{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}|{RESET}");
-    println!("{CYAN_BOLD}+--------------------------------------------------+{RESET}");
+    // バナー（Unicode 利用可能ならボックス描画文字、そうでなければ ASCII）
+    let (tl, tr, bl, br, h, v) = if use_unicode() {
+        ("╔", "╗", "╚", "╝", "═", "║")
+    } else {
+        ("+", "+", "+", "+", "-", "|")
+    };
+    let line = h.repeat(50);
+    println!("{CYAN_BOLD}{tl}{line}{tr}{RESET}");
+    println!("{CYAN_BOLD}{v}{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}{v}{RESET}");
+    println!("{CYAN_BOLD}{bl}{line}{br}{RESET}");
     println!("プロジェクト: {BOLD}{}{RESET}", root.display());
     println!("{DIM}ヘルプは :h  終了は exit または Ctrl+D{RESET}");
 
@@ -155,11 +180,12 @@ async fn main() -> anyhow::Result<()> {
 
         if !auto_confirm && !skip_confirm {
             let confirmed = 'confirm: loop {
+                // Enter（空入力）= Yes、n/N = No
                 match rl.readline("実行しますか? [Y/n] ") {
                     Ok(ans) => match ans.trim() {
                         "" | "y" | "Y" => break 'confirm Some(true),
                         "n" | "N"      => break 'confirm Some(false),
-                        other => println!("「{other}」は無効です。y か n を入力してください"),
+                        other => println!("{DIM}「{other}」は無効です。Enter で Yes、n で No{RESET}"),
                     },
                     Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
                         break 'confirm Some(false);
@@ -185,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
             result = run_agent(&mut session, &root, &task, verbose) => {
                 match result {
                     Ok(true)  => println!("\n{GREEN_BOLD}✓ タスク完了{RESET}"),
-                    Ok(false) => println!("\n{YELLOW}最大ターン数に達しました。タスクを再入力すると続きから作業できます。{RESET}"),
+                    Ok(false) => {} // agent/mod.rs 内で詳細メッセージ出力済み
                     Err(e)    => println!("\n{RED_BOLD}エラー: {e}{RESET}"),
                 }
             }
