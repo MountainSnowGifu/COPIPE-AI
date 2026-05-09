@@ -13,9 +13,10 @@ use session::CopilotSession;
 async fn main() -> anyhow::Result<()> {
     use rustyline::error::ReadlineError;
 
-    // CLI 引数パース: copipe-ai [--verbose|-v] [プロジェクトディレクトリ]
+    // CLI 引数パース: copipe-ai [--verbose|-v] [-y] [プロジェクトディレクトリ]
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let mut auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
     let root_dir = args.iter().find(|a| !a.starts_with('-')).cloned();
 
     let root = match root_dir {
@@ -51,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
     println!("  タスク実行中は {BOLD}Ctrl+C{RESET} でキャンセル");
     println!("  終了: {BOLD}exit{RESET} / {BOLD}quit{RESET} / {BOLD}Ctrl+D{RESET}");
     println!("  verbose 切替: {BOLD}:v{RESET}  (現在: {})", if verbose { "on" } else { "off" });
+    println!("  確認スキップ切替: {BOLD}:y{RESET}  (現在: {})", if auto_confirm { "on" } else { "off" });
+    println!("  タスク末尾に {BOLD}:y{RESET} で1回だけ確認スキップ  例: コードレビューして:y");
     println!();
     println!("{DIM}タスク例:{RESET}");
     println!("{DIM}  src ディレクトリの構成を調べてください{RESET}");
@@ -110,6 +113,18 @@ async fn main() -> anyhow::Result<()> {
             println!("verbose: {}", if verbose { "on" } else { "off" });
             continue 'repl;
         }
+        if task == ":y" {
+            auto_confirm = !auto_confirm;
+            println!("確認スキップ: {}", if auto_confirm { "on" } else { "off" });
+            continue 'repl;
+        }
+
+        // タスク末尾の :y で1回だけ確認スキップ
+        let (task, skip_confirm) = if task.ends_with(":y") {
+            (task[..task.len() - 2].trim().to_string(), true)
+        } else {
+            (task, false)
+        };
 
         // ── 確認ステップ ──────────────────────────────────────────────
         println!("┌─ タスク ─────────────────────────────────────────");
@@ -117,30 +132,33 @@ async fn main() -> anyhow::Result<()> {
             println!("│ {line}");
         }
         println!("└──────────────────────────────────────────────────");
-        // y / Y / Enter のみ実行。それ以外は再入力を促す。
-        let confirmed = 'confirm: loop {
-            match rl.readline("実行しますか? [Y/n] ") {
-                Ok(ans) => match ans.trim() {
-                    "" | "y" | "Y" => break 'confirm Some(true),
-                    "n" | "N"      => break 'confirm Some(false),
-                    other => println!("「{other}」は無効です。y か n を半角英字で入力してください"),
-                },
-                Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                    break 'confirm Some(false);
+
+        if !auto_confirm && !skip_confirm {
+            // y / Y / Enter のみ実行。それ以外は再入力を促す。
+            let confirmed = 'confirm: loop {
+                match rl.readline("実行しますか? [Y/n] ") {
+                    Ok(ans) => match ans.trim() {
+                        "" | "y" | "Y" => break 'confirm Some(true),
+                        "n" | "N"      => break 'confirm Some(false),
+                        other => println!("「{other}」は無効です。y か n を半角英字で入力してください"),
+                    },
+                    Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                        break 'confirm Some(false);
+                    }
+                    Err(e) => {
+                        eprintln!("入力エラー: {e}");
+                        break 'confirm None;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("入力エラー: {e}");
-                    break 'confirm None;
+            };
+            match confirmed {
+                Some(true) => {}
+                Some(false) => {
+                    println!("キャンセルしました");
+                    continue 'repl;
                 }
+                None => break 'repl,
             }
-        };
-        match confirmed {
-            Some(true) => {}
-            Some(false) => {
-                println!("キャンセルしました");
-                continue 'repl;
-            }
-            None => break 'repl,
         }
 
         // ── 実行フェーズ（Ctrl+C でキャンセル） ───────────────────────

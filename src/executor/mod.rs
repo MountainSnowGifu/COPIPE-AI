@@ -134,7 +134,15 @@ pub async fn execute(
                     Ok(abs) => match std::fs::read_to_string(&abs) {
                         Ok(content) => {
                             read_files.insert(abs);
-                            format!("```\n{content}\n```")
+                            const MAX_FILE_CHARS: usize = 15_000;
+                            if content.chars().count() > MAX_FILE_CHARS {
+                                let truncated: String = content.chars().take(MAX_FILE_CHARS).collect();
+                                let total_lines = content.lines().count();
+                                let shown_lines = truncated.lines().count();
+                                format!("```\n{truncated}\n```\n[残り {} 行省略。続きが必要なら read_file を再度使用してください]", total_lines - shown_lines)
+                            } else {
+                                format!("```\n{content}\n```")
+                            }
                         }
                         Err(e) => format!("ERROR: {e}"),
                     },
@@ -403,9 +411,22 @@ pub async fn execute(
 }
 
 pub fn format_tool_results(results: &[ToolResult]) -> String {
+    const MAX_TOTAL_CHARS: usize = 12_000;
     let mut parts = vec!["[ツール実行結果]".to_string()];
-    for r in results {
-        parts.push(format!("## {}\n{}", r.label, r.output));
+    let mut used = parts[0].len();
+    let total = results.len();
+    for (i, r) in results.iter().enumerate() {
+        let entry = format!("## {}\n{}", r.label, r.output);
+        if used + entry.len() > MAX_TOTAL_CHARS {
+            let remaining = total - i;
+            parts.push(format!(
+                "[残り {} 件の結果を省略（合計文字数制限）。次のターンで続きを確認してください]",
+                remaining
+            ));
+            break;
+        }
+        used += entry.len() + 2; // +2 for "\n\n"
+        parts.push(entry);
     }
     parts.join("\n\n")
 }

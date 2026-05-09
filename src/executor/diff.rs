@@ -1,5 +1,6 @@
 /// `@@ -old_start[,old_count] +new_start[,new_count] @@` をパースして
-/// (old_start_1indexed, old_line_count) を返す
+/// (old_start_1indexed, old_line_count) を返す。
+/// 行番号が省略された `@@` の場合は (0, 0) を返す（コンテキスト検索で補完する）。
 fn parse_hunk_header(line: &str) -> Result<(usize, usize), String> {
     let inner = line
         .trim_start_matches('@')
@@ -7,6 +8,11 @@ fn parse_hunk_header(line: &str) -> Result<(usize, usize), String> {
         .next()
         .unwrap_or("")
         .trim();
+
+    // `@@` だけで行番号なし → コンテキスト検索で補完
+    if inner.is_empty() {
+        return Ok((0, 0));
+    }
 
     let parts: Vec<&str> = inner.split_whitespace().collect();
     if parts.len() < 2 || !parts[0].starts_with('-') {
@@ -26,6 +32,30 @@ fn parse_hunk_header(line: &str) -> Result<(usize, usize), String> {
     };
 
     Ok((start, count))
+}
+
+/// ハンクのコンテキスト行・削除行でファイル内を検索して適用開始位置 (0-indexed) を返す
+fn find_hunk_position(lines: &[String], hunk: &[(char, String)]) -> Option<usize> {
+    let needle: Vec<&str> = hunk
+        .iter()
+        .filter(|(m, _)| matches!(m, ' ' | '-'))
+        .map(|(_, s)| s.as_str())
+        .collect();
+
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    'outer: for start in 0..=lines.len().saturating_sub(needle.len()) {
+        for (i, expected) in needle.iter().enumerate() {
+            let actual = lines.get(start + i).map(|s| s.as_str()).unwrap_or("");
+            if actual.trim_end() != expected.trim_end() {
+                continue 'outer;
+            }
+        }
+        return Some(start);
+    }
+    None
 }
 
 /// 標準 unified diff を `content` に適用して新しい文字列を返す
@@ -71,11 +101,31 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
             di += 1;
         }
 
-        let apply_at = (old_start as i64 - 1 + offset).max(0) as usize;
         let old_count = hunk
             .iter()
             .filter(|(m, _)| matches!(m, ' ' | '-'))
             .count();
+
+        // old_start == 0 は行番号省略の @@ → コンテキスト検索で位置を特定
+        let apply_at = if old_start == 0 {
+            match find_hunk_position(&lines, &hunk) {
+                Some(pos) => pos,
+                None => {
+                    let needle_preview: Vec<&str> = hunk
+                        .iter()
+                        .filter(|(m, _)| matches!(m, ' ' | '-'))
+                        .take(3)
+                        .map(|(_, s)| s.as_str())
+                        .collect();
+                    return Err(format!(
+                        "パッチ適用失敗: コンテキスト行がファイル内に見つかりません\n  検索行: {:?}",
+                        needle_preview
+                    ));
+                }
+            }
+        } else {
+            (old_start as i64 - 1 + offset).max(0) as usize
+        };
 
         if apply_at + old_count > lines.len() {
             return Err(format!(
@@ -95,7 +145,6 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
                 let matches =
                     actual == expected.as_str() || actual.trim_end() == expected.trim_end();
                 if !matches {
-                    // 周辺行を表示して AI が正しいコンテキストを再生成しやすくする
                     let ctx_start = old_idx.saturating_sub(2);
                     let ctx_end = (old_idx + 3).min(lines.len());
                     let ctx: Vec<String> = lines[ctx_start..ctx_end]

@@ -64,6 +64,27 @@ fn build_browser_command(candidate: &Path, port: u16, profile_dir: &Path) -> Com
         .arg(format!("--remote-debugging-port={port}"))
         .arg("--disable-blink-features=AutomationControlled")
         .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("--lang=ja-JP")
+        // 通常ブラウザに見せるための追加フラグ
+        .arg("--disable-infobars")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-notifications")
+        .arg("--disable-popup-blocking")
+        .arg("--password-store=basic")
+        .arg("--use-mock-keychain")
+        .arg("--window-size=1280,800")
+        .arg("--window-position=100,50")
+        .arg("--force-device-scale-factor=1")
+        .arg("--disable-features=IsolateOrigins,site-per-process")
+        // マウス/ポインターが存在する通常デスクトップ環境として通知
+        .arg("--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4")
+        // タブがバックグラウンドでもスロットリングされないようにする
+        .arg("--disable-backgrounding-occluded-windows")
+        .arg("--disable-renderer-backgrounding")
+        .arg("--disable-background-timer-throttling")
+        .env("LANG", "ja_JP.UTF-8")
+        .env("LC_ALL", "ja_JP.UTF-8")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 

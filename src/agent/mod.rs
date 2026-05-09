@@ -6,6 +6,7 @@ use crate::command::{parse_commands, AiCommand};
 use crate::executor::{execute, format_tool_results, now_timestamp, ToolResult, LOG_DIR};
 use crate::session::{ai_message_count, get_codeblocks_from_dom, page_diagnostic, CopilotSession};
 use std::io::Write as _;
+use std::time::Duration;
 
 // ─── エージェントループ ────────────────────────────────────────────────────────
 
@@ -37,11 +38,37 @@ const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
   bot:       message
 JSONの後に文章を続けず、コードブロック(```json ... ```)で出力してください。"#;
 
+/// JSON文字列値内の生の改行・タブをエスケープして修復を試みる
+fn sanitize_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => { out.push(ch); escaped = true; }
+            '"' => { in_string = !in_string; out.push(ch); }
+            '\n' if in_string => out.push_str("\\n"),
+            '\r' if in_string => out.push_str("\\r"),
+            '\t' if in_string => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 fn parse_blocks(blocks: &[String]) -> (Vec<crate::command::AiCommand>, Vec<String>) {
     let mut commands = Vec::new();
     let mut errors = Vec::new();
     for b in blocks {
-        match parse_commands(b) {
+        // まずそのままパース、失敗したらサニタイズして再試行
+        let result = parse_commands(b)
+            .or_else(|_| parse_commands(&sanitize_json(b)));
+        match result {
             Ok(cmds) => commands.extend(cmds),
             Err(e) => errors.push(format!(
                 "JSONパースエラー: {e}\n\n元のブロック:\n```\n{b}\n```\n\n{SCHEMA_HINT}"
@@ -56,12 +83,50 @@ async fn get_commands(
     root: &std::path::Path,
     prompt: &str,
 ) -> anyhow::Result<(Vec<crate::command::AiCommand>, Vec<String>)> {
-    if let Err(e) = session.send_raw(prompt).await {
-        write_browser_log(root, &format!("send_raw error: {e}"), session).await;
-        return Err(e);
+    write_browser_log(
+        root,
+        &format!("before send_raw: prompt_len={}", prompt.len()),
+        session,
+    )
+    .await;
+    match tokio::time::timeout(Duration::from_secs(210), session.send_raw(prompt)).await {
+        Ok(Ok(())) => {
+            write_browser_log(root, "after send_raw: ok", session).await;
+        }
+        Ok(Err(e)) => {
+            write_browser_log(root, &format!("send_raw error: {e}"), session).await;
+            return Err(e);
+        }
+        Err(_) => {
+            write_browser_log(root, "send_raw timeout after 210s", session).await;
+            anyhow::bail!("Copilot 送信/応答待ちが 210 秒でタイムアウトしました");
+        }
     }
-    let n = ai_message_count(&session.page).await?;
-    let blocks = get_codeblocks_from_dom(&session.page, n).await;
+    let n = match ai_message_count(&session.page).await {
+        Ok(n) => n,
+        Err(e) => {
+            write_browser_log(root, &format!("ai_message_count error: {e}"), session).await;
+            return Err(e);
+        }
+    };
+    // コードブロックが安定するまで最大3回リトライ（レンダリング遅延対策）
+    let blocks = {
+        let mut last = get_codeblocks_from_dom(&session.page, n).await;
+        for attempt in 1..=3u32 {
+            let (_, errs) = parse_blocks(&last);
+            let has_truncation = errs.iter().any(|e| e.contains("EOF"));
+            if !has_truncation {
+                break;
+            }
+            eprintln!("コードブロック途中切れ検出 → {}秒後に再取得 ({attempt}/3)", attempt);
+            tokio::time::sleep(Duration::from_secs(attempt as u64 * 2)).await;
+            let refreshed = get_codeblocks_from_dom(&session.page, n).await;
+            if refreshed != last {
+                last = refreshed;
+            }
+        }
+        last
+    };
 
     if blocks.is_empty() {
         eprintln!("JSON ブロックなし → 再要求します");
@@ -92,9 +157,14 @@ async fn write_browser_log(root: &std::path::Path, reason: &str, session: &Copil
         .append(true)
         .open(log_dir.join("browser_log"))
     {
-        let diag = page_diagnostic(&session.page).await;
-        let entry = format!("[{}] {reason}\n{diag}\n---\n", now_timestamp());
-        f.write_all(entry.as_bytes()).ok();
+        let header = format!("[{}] {reason}\n", now_timestamp());
+        f.write_all(header.as_bytes()).ok();
+        f.flush().ok();
+        let diag = match tokio::time::timeout(Duration::from_secs(3), page_diagnostic(&session.page)).await {
+            Ok(diag) => diag,
+            Err(_) => "{\"error\":\"page diagnostic timeout\"}".to_string(),
+        };
+        f.write_all(format!("{diag}\n---\n").as_bytes()).ok();
     }
 }
 
@@ -171,6 +241,16 @@ pub async fn run_agent(
     let mut consecutive_txt = 0u32;
 
     for turn in 0..MAX_TURNS {
+        // ターン間に人間らしいランダム待機（bot 検知回避）
+        if turn > 0 {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0) as u64;
+            let wait_ms = 2_000 + seed % 3_000; // 2〜5 秒
+            eprintln!("{DIM}次のターンまで {wait_ms}ms 待機...{RESET}");
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        }
         eprintln!("{DIM}[ターン {}/{}]{RESET}", turn + 1, MAX_TURNS);
         let (commands, parse_errors) = get_commands(session, root, &prompt).await?;
 
