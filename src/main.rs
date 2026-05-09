@@ -9,6 +9,25 @@ use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW};
 use executor::LOG_DIR;
 use session::CopilotSession;
 
+fn print_help() {
+    println!("{BOLD}操作方法{RESET}");
+    println!("  タスクを日本語で入力して Enter");
+    println!("  行末に \\ を付けると次の行に続けられます");
+    println!("  タスク実行中は {BOLD}Ctrl+C{RESET} でキャンセル");
+    println!("  終了: {BOLD}exit{RESET} / {BOLD}quit{RESET} / {BOLD}Ctrl+D{RESET}");
+    println!();
+    println!("{BOLD}コマンド{RESET}");
+    println!("  {BOLD}:h{RESET}   このヘルプを表示");
+    println!("  {BOLD}:v{RESET}   verbose モードを切替（ツール出力を詳しく表示）");
+    println!("  {BOLD}:y{RESET}   確認スキップモードを切替（毎回の Y/n を省略）");
+    println!("  タスク末尾に {BOLD}:y{RESET} で1回だけ確認スキップ  例: コードレビューして:y");
+    println!();
+    println!("{DIM}タスク例:{RESET}");
+    println!("{DIM}  src ディレクトリの構成を調べてください{RESET}");
+    println!("{DIM}  main.rs を読んで TODO を一覧にしてください{RESET}");
+    println!("{DIM}  cargo build して失敗したら修正してください{RESET}");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use rustyline::error::ReadlineError;
@@ -18,6 +37,11 @@ async fn main() -> anyhow::Result<()> {
     let mut verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let mut auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
     let root_dir = args.iter().find(|a| !a.starts_with('-')).cloned();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
 
     let root = match root_dir {
         Some(ref p) => std::path::PathBuf::from(p),
@@ -40,24 +64,12 @@ async fn main() -> anyhow::Result<()> {
     session.send_raw(&build_system_prompt(&root)).await?;
     println!("{GREEN_BOLD}✓{RESET} 準備完了\n");
 
-    println!("{CYAN_BOLD}╔══════════════════════════════════════════════════╗{RESET}");
-    println!("{CYAN_BOLD}║{RESET}          {BOLD}COPIPE-AI へようこそ{RESET}                   {CYAN_BOLD}║{RESET}");
-    println!("{CYAN_BOLD}╚══════════════════════════════════════════════════╝{RESET}");
+    // バナー（全角混在を避けるため ASCII ボックスで固定幅）
+    println!("{CYAN_BOLD}+--------------------------------------------------+{RESET}");
+    println!("{CYAN_BOLD}|{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}|{RESET}");
+    println!("{CYAN_BOLD}+--------------------------------------------------+{RESET}");
     println!("プロジェクト: {BOLD}{}{RESET}", root.display());
-    println!();
-    println!("{BOLD}操作方法{RESET}");
-    println!("  タスクを日本語で入力して Enter");
-    println!("  行末に \\ を付けると次の行に続けられます");
-    println!("  タスク実行中は {BOLD}Ctrl+C{RESET} でキャンセル");
-    println!("  終了: {BOLD}exit{RESET} / {BOLD}quit{RESET} / {BOLD}Ctrl+D{RESET}");
-    println!("  verbose 切替: {BOLD}:v{RESET}  (現在: {})", if verbose { "on" } else { "off" });
-    println!("  確認スキップ切替: {BOLD}:y{RESET}  (現在: {})", if auto_confirm { "on" } else { "off" });
-    println!("  タスク末尾に {BOLD}:y{RESET} で1回だけ確認スキップ  例: コードレビューして:y");
-    println!();
-    println!("{DIM}タスク例:{RESET}");
-    println!("{DIM}  src ディレクトリの構成を調べてください{RESET}");
-    println!("{DIM}  main.rs を読んで TODO を一覧にしてください{RESET}");
-    println!("{DIM}  cargo build して失敗したら修正してください{RESET}");
+    println!("{DIM}ヘルプは :h  終了は exit または Ctrl+D{RESET}");
 
     let mut rl = rustyline::DefaultEditor::new()?;
     let history_path = std::env::var("HOME")
@@ -69,10 +81,16 @@ async fn main() -> anyhow::Result<()> {
 
     'repl: loop {
         // ── 入力フェーズ（行末 \ でマルチライン継続） ──────────────────
+        let base_prompt = match (auto_confirm, verbose) {
+            (true,  true)  => "\n[y,v]> ",
+            (true,  false) => "\n[y]> ",
+            (false, true)  => "\n[v]> ",
+            (false, false) => "\n> ",
+        };
         let mut task = String::new();
         loop {
-            let prompt = if task.is_empty() { "\n> " } else { "... " };
-            match rl.readline(prompt) {
+            let prompt_str = if task.is_empty() { base_prompt } else { "... " };
+            match rl.readline(prompt_str) {
                 Ok(line) => {
                     rl.add_history_entry(line.as_str()).ok();
                     if line.ends_with('\\') {
@@ -84,11 +102,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
-                    if task.is_empty() {
-                        println!("{DIM}(Ctrl+D で終了){RESET}");
-                    } else {
+                    // Ctrl+C: 入力中なら内容クリア、空ならヒント
+                    if !task.is_empty() {
                         task.clear();
                         println!("{DIM}入力をクリアしました{RESET}");
+                    } else {
+                        println!("{DIM}(Ctrl+D で終了){RESET}");
                     }
                     continue 'repl;
                 }
@@ -104,18 +123,20 @@ async fn main() -> anyhow::Result<()> {
         if task.is_empty() {
             continue;
         }
-        if task == "exit" || task == "quit" {
-            break;
-        }
-        if task == ":v" || task == "verbose" {
-            verbose = !verbose;
-            println!("verbose: {BOLD}{}{RESET}", if verbose { "on" } else { "off" });
-            continue 'repl;
-        }
-        if task == ":y" {
-            auto_confirm = !auto_confirm;
-            println!("確認スキップ: {BOLD}{}{RESET}", if auto_confirm { "on" } else { "off" });
-            continue 'repl;
+        match task.as_str() {
+            "exit" | "quit" => break,
+            ":h" => { print_help(); continue 'repl; }
+            ":v" => {
+                verbose = !verbose;
+                println!("verbose: {BOLD}{}{RESET}", if verbose { "on" } else { "off" });
+                continue 'repl;
+            }
+            ":y" => {
+                auto_confirm = !auto_confirm;
+                println!("確認スキップ: {BOLD}{}{RESET}", if auto_confirm { "on" } else { "off" });
+                continue 'repl;
+            }
+            _ => {}
         }
 
         // タスク末尾の :y で1回だけ確認スキップ
@@ -163,11 +184,14 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             result = run_agent(&mut session, &root, &task, verbose) => {
                 match result {
-                    Ok(()) => println!("\n{GREEN_BOLD}✓ タスク完了{RESET}"),
-                    Err(e) => println!("\n{RED_BOLD}エラー: {e}{RESET}"),
+                    Ok(true)  => println!("\n{GREEN_BOLD}✓ タスク完了{RESET}"),
+                    Ok(false) => println!("\n{YELLOW}最大ターン数に達しました。タスクを再入力すると続きから作業できます。{RESET}"),
+                    Err(e)    => println!("\n{RED_BOLD}エラー: {e}{RESET}"),
                 }
             }
             _ = tokio::signal::ctrl_c() => {
+                // Copilot ブラウザ側の生成も停止してから戻る
+                session.stop_generation().await;
                 println!("\n{YELLOW}キャンセルしました{RESET}");
             }
         }

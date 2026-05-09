@@ -95,8 +95,8 @@ impl CopilotSession {
         let (browser, mut handler) = Browser::connect(&ws_url).await?;
         let handle = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
-                if let Err(e) = h {
-                    eprintln!("ハンドラエラー: {e}");
+                if let Err(_) = h {
+                    // CDP切断エラーは終了時の正常シーケンスでも発生するため黙殺
                     break;
                 }
             }
@@ -223,7 +223,13 @@ impl CopilotSession {
             "#).await.ok()
                 .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
                 .unwrap_or_default();
-            eprintln!("[送信フォールバック] {click_result}");
+            // フォールバック詳細はファイルのみ（端末には出さない）
+            if let Ok(log_dir) = std::env::current_dir().map(|d| d.join(".copipe_logs")) {
+                use std::io::Write as IoWrite;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("browser_log")) {
+                    let _ = writeln!(f, "[送信フォールバック] {click_result}\n---");
+                }
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
@@ -232,5 +238,37 @@ impl CopilotSession {
         scroll_to_nth_ai_message(page, target).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(())
+    }
+
+    /// Copilot の生成を停止する（Ctrl+C キャンセル時に呼ぶ）。
+    /// 停止ボタンが見つからない場合は Escape キーを送信してフォールバック。
+    pub async fn stop_generation(&self) {
+        let result = self.page.evaluate_expression(r#"
+            (function() {
+                // 生成停止ボタンを探してクリック
+                const selectors = [
+                    '[aria-label*="Stop"]', '[aria-label*="停止"]',
+                    '[data-testid*="stop"]', '[data-testid*="Stop"]',
+                    'button[title*="Stop"]', 'button[title*="停止"]',
+                ];
+                for (const sel of selectors) {
+                    const btn = document.querySelector(sel);
+                    if (btn && !btn.disabled) {
+                        btn.click();
+                        return 'stopped:' + sel;
+                    }
+                }
+                // フォールバック: Escape キー
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
+                }));
+                return 'escape_sent';
+            })()
+        "#).await;
+        if let Ok(r) = result {
+            if let Some(v) = r.value() {
+                eprintln!("[停止] {}", v.as_str().unwrap_or(""));
+            }
+        }
     }
 }

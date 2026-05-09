@@ -9,8 +9,6 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
     // テキスト処理（sed は -i を別途ブロック）
     "sort", "uniq", "tr", "cut", "awk", "sed", "jq",
-    // ビルド
-    "make",
     // 情報表示
     "echo", "printf", "date", "env",
 ];

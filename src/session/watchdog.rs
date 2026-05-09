@@ -45,15 +45,15 @@ pub(super) async fn wait_for_ai_message_count(
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!();
-            anyhow::bail!("応答の開始がタイムアウトしました");
+            anyhow::bail!("Copilot が応答しませんでした。しばらく待ってから再実行してください");
         }
         if tokio::time::Instant::now() >= check_block_at {
             check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
+            // 診断情報はファイルのみ（端末には出さない）
             let input_state = page.evaluate_expression(r#"
                 (function() {
                     const inp = document.querySelector('#userInput');
                     const allBtns = [...document.querySelectorAll('button')].map(b => ({
-                        id: b.id || null,
                         aria: b.getAttribute('aria-label') || null,
                         testid: b.getAttribute('data-testid') || null,
                         disabled: b.disabled,
@@ -70,14 +70,20 @@ pub(super) async fn wait_for_ai_message_count(
             "#).await.ok()
                 .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
                 .unwrap_or_else(|| "{}".to_string());
-            eprintln!("\n[診断] {input_state}");
+            if let Ok(log_dir) = std::env::current_dir().map(|d| d.join(".copipe_logs")) {
+                use std::io::Write as IoWrite;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("browser_log")) {
+                    let _ = writeln!(f, "[診断] {input_state}\n---");
+                }
+            }
             if let Some(reason) = detect_copilot_block(page).await {
-                eprintln!();
-                anyhow::bail!("Copilot が応答を停止しました: {reason}");
+                eprintln!("\n応答が停止しました。再実行してください");
+                anyhow::bail!("Copilot との接続が切れました（{reason}）。再実行してください");
             }
         }
         let secs = start.elapsed().as_secs();
-        eprint!("\r応答を待機中... ({secs}秒)          ");
+        // \r で上書きする進捗表示（診断 eprintln! と競合しないよう stderr flush）
+        eprint!("\r  応答待機中 {secs}s          ");
         std::io::stderr().flush().ok();
     }
 }
@@ -119,7 +125,7 @@ pub(super) async fn wait_for_stable_text(
             if !last.is_empty() {
                 return Ok(last);
             }
-            anyhow::bail!("応答テキストの取得がタイムアウトしました");
+            anyhow::bail!("Copilot の応答が途中で止まりました。再実行してください");
         }
 
         if tokio::time::Instant::now() >= check_block_at {
@@ -130,7 +136,7 @@ pub(super) async fn wait_for_stable_text(
                     eprintln!("警告: Copilot ブロック検知 ({reason}) - 取得済みテキストで続行");
                     return Ok(last);
                 }
-                anyhow::bail!("Copilot が応答を停止しました: {reason}");
+                anyhow::bail!("Copilot との接続が切れました（{reason}）。再実行してください");
             }
         }
     }

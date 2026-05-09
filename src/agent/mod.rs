@@ -26,7 +26,7 @@ const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
   read_file / list_dir / file / patch / mkdir / delete_file
   cmd / txt / read_log / bot / error
 必須フィールド:
-  read_file: path
+  read_file: path  ※ offset_lines(省略可) で続きを読める
   list_dir:  path
   file:      path, content
   patch:     path, diff
@@ -82,6 +82,7 @@ async fn get_commands(
     session: &mut CopilotSession,
     root: &std::path::Path,
     prompt: &str,
+    verbose: bool,
 ) -> anyhow::Result<(Vec<crate::command::AiCommand>, Vec<String>)> {
     write_browser_log(
         root,
@@ -99,7 +100,7 @@ async fn get_commands(
         }
         Err(_) => {
             write_browser_log(root, "send_raw timeout after 210s", session).await;
-            anyhow::bail!("Copilot 送信/応答待ちが 210 秒でタイムアウトしました");
+            anyhow::bail!("Copilot との通信がタイムアウトしました。再実行してください");
         }
     }
     let n = match ai_message_count(&session.page).await {
@@ -118,7 +119,7 @@ async fn get_commands(
             if !has_truncation {
                 break;
             }
-            eprintln!("{DIM}[再取得中 {attempt}/3]{RESET}");
+            if verbose { eprintln!("{DIM}[再取得中 {attempt}/3]{RESET}"); }
             tokio::time::sleep(Duration::from_secs(attempt as u64 * 2)).await;
             let refreshed = get_codeblocks_from_dom(&session.page, n).await;
             if refreshed != last {
@@ -129,7 +130,7 @@ async fn get_commands(
     };
 
     if blocks.is_empty() {
-        eprintln!("{DIM}[応答再要求]{RESET}");
+        if verbose { eprintln!("{DIM}[応答再要求]{RESET}"); }
         write_browser_log(root, "no JSON code block in latest AI message", session).await;
         if let Err(e) = session.send_raw(
             "次の作業ステップを JSON スキーマ形式で記述してください。\
@@ -228,12 +229,13 @@ fn summarize_for_display(label: &str, output: &str) -> String {
 
 pub const MAX_TURNS: u32 = 20;
 
+/// Ok(true) = 正常完了、Ok(false) = 最大ターン数到達
 pub async fn run_agent(
     session: &mut CopilotSession,
     root: &std::path::Path,
     user_task: &str,
     verbose: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let mut prompt = user_task.to_string();
     let mut read_files = std::collections::HashSet::new();
     let mut done_log: Vec<String> = Vec::new();
@@ -253,8 +255,8 @@ pub async fn run_agent(
             }
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
         }
-        eprintln!("{DIM}[{}/{}]{RESET}", turn + 1, MAX_TURNS);
-        let (commands, parse_errors) = get_commands(session, root, &prompt).await?;
+        println!("{DIM}● ステップ {}/{}{RESET}", turn + 1, MAX_TURNS);
+        let (commands, parse_errors) = get_commands(session, root, &prompt, verbose).await?;
 
         // ai_log にこのターンの命令を記録
         {
@@ -289,8 +291,9 @@ pub async fn run_agent(
             .collect();
 
         if commands.is_empty() && tool_results.is_empty() {
-            println!("コマンドが取得できませんでした");
-            break;
+            use crate::color::YELLOW;
+            println!("{YELLOW}応答からコマンドを取得できませんでした。タスクを再入力してください。{RESET}");
+            return Ok(false);
         }
 
         // bot + 実ツールが共存する場合はまだ完了とみなさない
@@ -357,13 +360,21 @@ pub async fn run_agent(
         }
 
         for r in &tool_results {
-            if r.output.starts_with("ERROR:") {
-                println!("{RED_BOLD}[{}]{RESET} {}", r.label, r.output);
+            if r.label == "ParseError" {
+                // ParseError は verbose 時のみ、通常は browser_log へ記録して非表示
+                if verbose {
+                    println!("  {RED_BOLD}[ParseError]{RESET} JSON パース失敗（詳細は browser_log）");
+                }
+            } else if r.output.starts_with("ERROR:") {
+                println!("  {RED_BOLD}[{}]{RESET} {}", r.label, r.output);
             } else if verbose {
-                println!("[{}] {}", r.label, r.output);
+                // verbose: 最初の15行のみ表示
+                let preview: String = r.output.lines().take(15).collect::<Vec<_>>().join("\n");
+                let suffix = if r.output.lines().count() > 15 { "\n  …" } else { "" };
+                println!("  {DIM}[{}]{RESET}\n{}{}", r.label, preview, suffix);
             } else {
                 println!(
-                    "{DIM}[{}] {}{RESET}",
+                    "  {DIM}[{}] {}{RESET}",
                     r.label,
                     summarize_for_display(&r.label, &r.output)
                 );
@@ -371,8 +382,6 @@ pub async fn run_agent(
         }
 
         if turn + 1 == MAX_TURNS {
-            use crate::color::YELLOW;
-            println!("{YELLOW}最大ターン数 ({MAX_TURNS}) に達しました。タスクを再入力すると続きから作業できます。{RESET}");
             reached_max = true;
             break;
         }
@@ -396,5 +405,5 @@ pub async fn run_agent(
         }
     }
 
-    Ok(())
+    Ok(!reached_max)
 }

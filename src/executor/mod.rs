@@ -1,5 +1,5 @@
 mod diff;
-mod safety;
+pub mod safety;
 
 use diff::apply_unified_diff;
 use safety::check_cmd_safety;
