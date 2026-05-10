@@ -1,5 +1,5 @@
-mod context;
 pub mod checkpoints;
+mod context;
 pub(crate) mod diff;
 pub mod errors;
 pub mod hooks;
@@ -26,36 +26,63 @@ pub fn safe_append_log(path: &Path, content: &str) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        #[cfg(target_os = "linux")]  const O_NOFOLLOW: i32 = 0o400000;
-        #[cfg(target_os = "macos")] const O_NOFOLLOW: i32 = 0x100;
+        #[cfg(target_os = "linux")]
+        const O_NOFOLLOW: i32 = 0o400000;
+        #[cfg(target_os = "macos")]
+        const O_NOFOLLOW: i32 = 0x100;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         const O_NOFOLLOW: i32 = 0;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .custom_flags(O_NOFOLLOW).open(path)
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
         {
             let _ = f.write_all(content.as_bytes());
         }
     }
     #[cfg(not(unix))]
     {
-        if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) { return; }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = f.write_all(content.as_bytes());
         }
     }
 }
 
 pub fn now_timestamp() -> String {
-    let offset_hours: i64 = std::env::var("TZ").ok()
+    let offset_hours: i64 = std::env::var("TZ")
+        .ok()
         .and_then(|tz| {
-            if tz.contains("Tokyo") || tz.contains("JST") { Some(9) }
-            else if tz == "UTC" || tz == "GMT" { Some(0) }
-            else { None }
+            if tz.contains("Tokyo") || tz.contains("JST") {
+                Some(9)
+            } else if tz == "UTC" || tz == "GMT" {
+                Some(0)
+            } else {
+                None
+            }
         })
         .unwrap_or(9);
-    let utc_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let utc_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let local_secs = (utc_secs + offset_hours * 3600) as u64;
-    let (h, m, s) = (local_secs % 86400 / 3600, local_secs % 3600 / 60, local_secs % 60);
+    let (h, m, s) = (
+        local_secs % 86400 / 3600,
+        local_secs % 3600 / 60,
+        local_secs % 60,
+    );
     let (y, mo, d) = days_to_ymd(local_secs / 86400);
     let tz_label = if offset_hours == 9 { "JST" } else { "UTC" };
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02} {tz_label}")
@@ -66,13 +93,35 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     loop {
         let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
         let dy = if leap { 366 } else { 365 };
-        if days < dy { break; }
-        days -= dy; y += 1;
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        y += 1;
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let months = [31u64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 1u64;
-    for &dm in &months { if days < dm { break; } days -= dm; mo += 1; }
+    for &dm in &months {
+        if days < dm {
+            break;
+        }
+        days -= dm;
+        mo += 1;
+    }
     (y, mo, days + 1)
 }
 
@@ -85,7 +134,11 @@ pub struct ToolResult {
 
 impl ToolResult {
     pub fn new(label: impl Into<String>, output: impl Into<String>) -> Self {
-        Self { label: label.into(), output: output.into(), cmd_index: 0 }
+        Self {
+            label: label.into(),
+            output: output.into(),
+            cmd_index: 0,
+        }
     }
 }
 
@@ -126,68 +179,108 @@ pub async fn execute(
             ($tool_name:literal, $label:expr, $exec:expr) => {{
                 let result = match pre_hooks::run($tool_name, cmd) {
                     pre_hooks::PreHookOutcome::Block(msg) => blocked($label, msg),
-                    pre_hooks::PreHookOutcome::Continue   => post($tool_name, $exec),
+                    pre_hooks::PreHookOutcome::Continue => post($tool_name, $exec),
                 };
                 results.push(result);
             }};
         }
 
         match cmd {
-            AiCommand::ReadFile { path, offset_lines } =>
-                dispatch!("read_file", format!("ReadFile({path})"),
-                    tools::read_file::handle(&mut ctx, path, *offset_lines)),
+            AiCommand::ReadFile { path, offset_lines } => dispatch!(
+                "read_file",
+                format!("ReadFile({path})"),
+                tools::read_file::handle(&mut ctx, path, *offset_lines)
+            ),
 
-            AiCommand::ListDir { path } =>
-                dispatch!("list_dir", format!("ListDir({path})"),
-                    tools::list_dir::handle(&ctx, path)),
+            AiCommand::ListDir { path } => dispatch!(
+                "list_dir",
+                format!("ListDir({path})"),
+                tools::list_dir::handle(&ctx, path)
+            ),
 
-            AiCommand::Grep { pattern, path, context_lines, file_glob } =>
-                dispatch!("grep", format!("Grep({pattern} in {path})"),
-                    tools::grep::handle(&ctx, pattern, path, *context_lines, file_glob)),
+            AiCommand::Grep {
+                pattern,
+                path,
+                context_lines,
+                file_glob,
+            } => dispatch!(
+                "grep",
+                format!("Grep({pattern} in {path})"),
+                tools::grep::handle(&ctx, pattern, path, *context_lines, file_glob)
+            ),
 
-            AiCommand::Glob { pattern } =>
-                dispatch!("glob", format!("Glob({pattern})"),
-                    tools::glob::handle(&ctx, pattern)),
+            AiCommand::Glob { pattern } => dispatch!(
+                "glob",
+                format!("Glob({pattern})"),
+                tools::glob::handle(&ctx, pattern)
+            ),
 
-            AiCommand::Edit { path, old_string, new_string } =>
-                dispatch!("edit", format!("Edit({path})"),
-                    tools::edit::handle(&mut ctx, path, old_string, new_string)),
+            AiCommand::Edit {
+                path,
+                old_string,
+                new_string,
+            } => dispatch!(
+                "edit",
+                format!("Edit({path})"),
+                tools::edit::handle(&mut ctx, path, old_string, new_string)
+            ),
 
-            AiCommand::AskUser { question, hint } =>
-                dispatch!("ask_user", "AskUser".to_string(),
-                    tools::ask_user::handle(question, hint).await),
+            AiCommand::AskUser { question, hint } => dispatch!(
+                "ask_user",
+                "AskUser".to_string(),
+                tools::ask_user::handle(question, hint).await
+            ),
 
-            AiCommand::TodoWrite { todos } =>
-                dispatch!("todo_write", "TodoWrite".to_string(),
-                    tools::todo_write::handle(&ctx, todos)),
+            AiCommand::TodoWrite { todos } => dispatch!(
+                "todo_write",
+                "TodoWrite".to_string(),
+                tools::todo_write::handle(&ctx, todos)
+            ),
 
-            AiCommand::MultiEdit { path, edits } =>
-                dispatch!("multi_edit", format!("MultiEdit({path})"),
-                    tools::multi_edit::handle(&mut ctx, path, edits)),
+            AiCommand::MultiEdit { path, edits } => dispatch!(
+                "multi_edit",
+                format!("MultiEdit({path})"),
+                tools::multi_edit::handle(&mut ctx, path, edits)
+            ),
 
-            AiCommand::WebFetch { url, selector } =>
-                dispatch!("web_fetch", format!("WebFetch({url})"),
-                    tools::web_fetch::handle(url, selector).await),
+            AiCommand::WebFetch { url, selector } => dispatch!(
+                "web_fetch",
+                format!("WebFetch({url})"),
+                tools::web_fetch::handle(url, selector).await
+            ),
 
-            AiCommand::EnterWorktree =>
-                dispatch!("enter_worktree", "EnterWorktree".to_string(),
-                    tools::worktree::enter(ctx.root).await),
+            AiCommand::EnterWorktree => dispatch!(
+                "enter_worktree",
+                "EnterWorktree".to_string(),
+                tools::worktree::enter(ctx.root).await
+            ),
 
-            AiCommand::ExitWorktree { action, commit_message } =>
-                dispatch!("exit_worktree", "ExitWorktree".to_string(),
-                    tools::worktree::exit(ctx.root, action, commit_message).await),
+            AiCommand::ExitWorktree {
+                action,
+                commit_message,
+            } => dispatch!(
+                "exit_worktree",
+                "ExitWorktree".to_string(),
+                tools::worktree::exit(ctx.root, action, commit_message).await
+            ),
 
-            AiCommand::File { path, content } =>
-                dispatch!("write_file", format!("WriteFile({path})"),
-                    tools::write_file::handle(&mut ctx, path, content)),
+            AiCommand::File { path, content } => dispatch!(
+                "write_file",
+                format!("WriteFile({path})"),
+                tools::write_file::handle(&mut ctx, path, content)
+            ),
 
-            AiCommand::Mkdir { path } =>
-                dispatch!("mkdir", format!("Mkdir({path})"),
-                    tools::mkdir::handle(&ctx, path)),
+            AiCommand::Mkdir { path } => dispatch!(
+                "mkdir",
+                format!("Mkdir({path})"),
+                tools::mkdir::handle(&ctx, path)
+            ),
 
-            AiCommand::DeleteFile { path } =>
-                dispatch!("delete_file", format!("DeleteFile({path})"),
-                    tools::delete_file::handle(&mut ctx, path)),
+            AiCommand::DeleteFile { path } => dispatch!(
+                "delete_file",
+                format!("DeleteFile({path})"),
+                tools::delete_file::handle(&mut ctx, path)
+            ),
 
             AiCommand::DeleteFolder { path } => {
                 let mut r = ToolResult::new(
@@ -198,31 +291,48 @@ pub async fn execute(
                 results.push(r);
             }
 
-            AiCommand::Patch { path, diff } =>
-                dispatch!("patch", format!("Patch({path})"),
-                    tools::patch::handle(&mut ctx, path, diff)),
+            AiCommand::Patch { path, diff } => dispatch!(
+                "patch",
+                format!("Patch({path})"),
+                tools::patch::handle(&mut ctx, path, diff)
+            ),
 
-            AiCommand::ReadLog { filename } =>
-                dispatch!("read_log", format!("ReadLog({filename})"),
-                    tools::read_log::handle(&ctx, filename)),
+            AiCommand::ReadLog { filename } => dispatch!(
+                "read_log",
+                format!("ReadLog({filename})"),
+                tools::read_log::handle(&ctx, filename)
+            ),
 
-            AiCommand::Cmd { name, cmd, workdir, timeout } =>
-                dispatch!("cmd", format!("Cmd({name})"),
-                    tools::cmd::handle(&ctx, name, cmd, workdir, *timeout).await),
+            AiCommand::Cmd {
+                name,
+                cmd,
+                workdir,
+                timeout,
+            } => dispatch!(
+                "cmd",
+                format!("Cmd({name})"),
+                tools::cmd::handle(&ctx, name, cmd, workdir, *timeout).await
+            ),
 
-            AiCommand::Txt { content } =>
-                messages.push(content.clone()),
+            AiCommand::Txt { content } => messages.push(content.clone()),
 
             AiCommand::Bot { message, content } => {
                 let msg = message.as_deref().or(content.as_deref()).unwrap_or("");
-                if !msg.is_empty() { messages.push(msg.to_string()); }
+                if !msg.is_empty() {
+                    messages.push(msg.to_string());
+                }
             }
 
             AiCommand::Error { message, content } => {
                 let mut r = ToolResult::new(
                     "Error",
-                    format!("ERROR: AI がエラーを報告しました: {}",
-                        message.as_deref().or(content.as_deref()).unwrap_or("(詳細なし)")),
+                    format!(
+                        "ERROR: AI がエラーを報告しました: {}",
+                        message
+                            .as_deref()
+                            .or(content.as_deref())
+                            .unwrap_or("(詳細なし)")
+                    ),
                 );
                 r.cmd_index = idx;
                 results.push(r);

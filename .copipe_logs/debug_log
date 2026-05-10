@@ -1,9 +1,1024 @@
 
-=== TURN 1/30 [2026-05-10 19:58:08 JST] ===
-[PROMPT] 7 chars:
+=== TURN 1/30 [2026-05-10 20:39:05 JST] ===
+[PROMPT] 173 chars:
 ---PROMPT START---
-１を　修正して
+全体コードレビューして
+
+[効率化ヒント]
+- レビュー対象ファイルが依頼文から明確なら、空 grep を挟まず直接 read_file してください。
+- grep を使う場合は、必ず空でない具体的な pattern を指定してください。
+- 調査が終わったら、bot の message に具体的な指摘・根拠・改善案を省略せず書いてください。
 ---PROMPT END---
 [SESSION] read_files=0 done_log=0
   read: (なし)
   done: (なし)
+[TIMING] 18.46s
+---
+
+=== TURN 2/30 [2026-05-10 20:39:24 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=2.6s
+[PROMPT] 1210 chars:
+---PROMPT START---
+## Static context
+[元のタスク] 全体コードレビューして
+
+## Dynamic context
+[完了済みアクション] ✓ Glob(src/**/*.rs)
+
+## Tool results
+[ツール実行結果]
+
+[#2 → Glob(src/**/*.rs)]
+src/agent/context.rs
+src/agent/debug_log.rs
+src/agent/log.rs
+src/agent/mod.rs
+src/agent/parser.rs
+src/agent/prompt.rs
+src/agent/rate_limiter.rs
+src/agent/runner.rs
+src/agent/session_store.rs
+src/color.rs
+src/command.rs
+src/executor/checkpoints.rs
+src/executor/context.rs
+src/executor/diff.rs
+src/executor/errors.rs
+src/executor/hooks.rs
+src/executor/mod.rs
+src/executor/pre_hooks.rs
+src/executor/safety.rs
+src/executor/tools/ask_user.rs
+src/executor/tools/cmd.rs
+src/executor/tools/delete_file.rs
+src/executor/tools/edit.rs
+src/executor/tools/glob.rs
+src/executor/tools/grep.rs
+src/executor/tools/list_dir.rs
+src/executor/tools/mkdir.rs
+src/executor/tools/mod.rs
+src/executor/tools/multi_edit.rs
+src/executor/tools/patch.rs
+src/executor/tools/read_file.rs
+src/executor/tools/read_log.rs
+src/executor/tools/todo_write.rs
+src/executor/tools/web_fetch.rs
+src/executor/tools/worktree.rs
+src/executor/tools/write_file.rs
+src/lib.rs
+src/main.rs
+src/paths.rs
+src/session/browser.rs
+src/session/dom.rs
+src/session/mod.rs
+src/session/page.rs
+src/session/watchdog.rs
+
+[44 ファイル]
+---PROMPT END---
+[SESSION] read_files=0 done_log=1
+  read: (なし)
+  done: ✓ Glob(src/**/*.rs)
+[TIMING] 25.24s
+---
+
+=== TURN 3/30 [2026-05-10 20:39:49 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=1.6s
+[PROMPT] 8348 chars:
+---PROMPT START---
+## Static context
+[元のタスク] 全体コードレビューして
+
+## Dynamic context
+[完了済みアクション]
+[Context compacted — summary of 3 earlier actions (✓3)]
+✓ Glob(src/**/*.rs) | ✓ Grep(unwrap( in src) | ✓ Grep(expect( in src)
+[Recent] ✓ Grep(panic! in src) → ✓ Grep(unsafe in src) → ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
+
+## Tool results
+[ツール実行結果]
+
+[#2 → Grep(unwrap( in src)]
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/agent/session_store.rs ──
+  161:         assert!(store.exists());
+  162: 
+> 163:         let loaded = store.load().unwrap();
+  164:         assert_eq!(loaded.user_task, "コードレビューして");
+  165:         assert_eq!(loaded.turn_count, 5);
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/command.rs ──
+  218:     #[test]
+  219:     fn parse_commands_accepts_add_alias() {
+> 220:         let cmds = parse_commands(r#"{"type":"add","path":"a.txt","content":"hello"}"#).unwrap();
+  221:         assert!(
+  222:             matches!(cmds.as_slice(), [AiCommand::File { path, content }] if path == "a.txt" && content == "hello")
+      ···
+  228:         let cmds =
+  229:             parse_commands(r#"{"type":"edit","path":"src/main.rs","patch":"@@\n-old\n+new\n"}"#)
+> 230:                 .unwrap();
+  231:         assert!(
+  232:             matches!(cmds.as_slice(), [AiCommand::Patch { path, diff }] if path == "src/main.rs" && diff.contains("+new"))
+      ···
+  236:     #[test]
+  237:     fn parse_commands_strips_json_prefix() {
+> 238:         let cmds = parse_commands("json [{\"type\":\"txt\",\"content\":\"ok\"}]").unwrap();
+  239:         assert!(matches!(cmds.as_slice(), [AiCommand::Txt { content }] if content == "ok"));
+  240:     }
+      ···
+  248: ]"#;
+  249: 
+> 250:         let cmds = parse_commands(input).unwrap();
+  251: 
+  252:         assert_eq!(cmds.len(), 3);
+      ···
+  261:             r#"{"type":"grep","pattern":"","path":"src/agent/debug_log.rs","context_lines":0}"#,
+  262:         )
+> 263:         .unwrap();
+  264: 
+  265:         assert!(
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/checkpoints.rs ──
+  161: 
+  162:     fn setup() -> (tempfile::TempDir, CheckpointManager) {
+> 163:         let dir = tempfile::tempdir().unwrap();
+  164:         let mgr = CheckpointManager::new(dir.path());
+  165:         (dir, mgr)
+      ···
+  170:         let (dir, mut mgr) = setup();
+  171:         let file = dir.path().join("test.rs");
+> 172:         std::fs::write(&file, "original content").unwrap();
+  173: 
+  174:         // チェックポイント保存
+      ···
+  178: 
+  179:         // ファイルを変更
+> 180:         std::fs::write(&file, "modified content").unwrap();
+  181: 
+  182:         // Undo で復元
+      ···
+  181: 
+  182:         // Undo で復元
+> 183:         let result = mgr.undo().unwrap();
+  184:         assert!(result.is_some());
+  185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
+      ···
+  183:         let result = mgr.undo().unwrap();
+  184:         assert!(result.is_some());
+> 185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
+  186:         assert_eq!(mgr.len(), 0);
+  187:     }
+      ···
+  190:     fn test_undo_empty_returns_none() {
+  191:         let (_dir, mut mgr) = setup();
+> 192:         let result = mgr.undo().unwrap();
+  193:         assert!(result.is_none());
+  194:     }
+      ···
+  200: 
+  201:         let file = dir.path().join("f.rs");
+> 202:         std::fs::write(&file, "x").unwrap();
+  203: 
+  204:         for _ in 0..=MAX_CHECKPOINTS {
+      ···
+  214:         let file1 = dir.path().join("a.rs");
+  215:         let file2 = dir.path().join("b.rs");
+> 216:         std::fs::write(&file1, "a").unwrap();
+  217:         std::fs::write(&file2, "b").unwrap();
+  218: 
+      ···
+  215:         let file2 = dir.path().join("b.rs");
+  216:         std::fs::write(&file1, "a").unwrap();
+> 217:         std::fs::write(&file2, "b").unwrap();
+  218: 
+  219:         mgr.save(&file1, "a", "write");
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/context.rs ──
+   93:     #[test]
+   94:     fn rejects_windows_absolute_paths_on_all_targets() {
+>  95:         let dir = tempfile::tempdir().unwrap();
+   96:         let mut read_files = HashSet::new();
+   97:         let mut checkpoints = CheckpointManager::new(dir.path());
+      ···
+  104:     #[test]
+  105:     fn rejects_windows_parent_components_on_all_targets() {
+> 106:         let dir = tempfile::tempdir().unwrap();
+  107:         let mut read_files = HashSet::new();
+  108:         let mut checkpoints = CheckpointManager::new(dir.path());
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/edit.rs ──
+  160:         let result = content_after_edit(src, old, new);
+  161:         assert!(result.is_some());
+> 162:         assert!(result.unwrap().contains("hello!"));
+  163:     }
+  164: }
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/glob.rs ──
+  266:     #[test]
+  267:     fn test_handle_src_recursive_pattern() {
+> 268:         let dir = tempfile::tempdir().unwrap();
+  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+      ···
+  267:     fn test_handle_src_recursive_pattern() {
+  268:         let dir = tempfile::tempdir().unwrap();
+> 269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+      ···
+  268:         let dir = tempfile::tempdir().unwrap();
+  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+> 270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+      ···
+  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+> 271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+  273: 
+      ···
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+> 272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+  273: 
+  274:         let mut read_files = std::collections::HashSet::new();
+      ···
+  285:     #[test]
+  286:     fn test_handle_windows_separator_pattern() {
+> 287:         let dir = tempfile::tempdir().unwrap();
+  288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+      ···
+  286:     fn test_handle_windows_separator_pattern() {
+  287:         let dir = tempfile::tempdir().unwrap();
+> 288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  290:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+      ···
+  287:         let dir = tempfile::tempdir().unwrap();
+  288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+> 289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  290:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  291:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+      ···
+  288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+> 290:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  291:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+  292: 
+      ···
+  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  290:         std::fs::wri
+...[348 文字以降省略]
+---PROMPT END---
+[SESSION] read_files=0 done_log=8
+  read: (なし)
+  done: ✓ Grep(panic! in src) → ✓ Grep(unsafe in src) → ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
+[TIMING] 24.79s
+---
+
+=== TURN 4/30 [2026-05-10 20:40:14 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=2.7s
+[PROMPT] 8657 chars:
+---PROMPT START---
+## Static context
+[元のタスク] 全体コードレビューして
+
+## Dynamic context
+[読み込み済みファイル（再読み不要）] src/lib.rs, src/main.rs
+[完了済みアクション]
+[Context compacted — summary of 9 earlier actions (✓9)]
+✓ Glob(src/**/*.rs) | ✓ Grep(unwrap( in src) | ✓ Grep(expect( in src) | ✓ Grep(panic! in src) | ✓ Grep(unsafe in src) | ✓ Grep(TODO in src) | ✓ Grep(todo! in src) | ✓ Grep(dbg!( in src) | ✓ ReadFile(src/main.rs)
+[Recent] ✓ ReadFile(src/lib.rs) → ✓ ReadFile(src/executor/mod.rs) → ✓ ReadFile(src/agent/mod.rs) → ✓ ReadFile(src/executor/context.rs) → ✓ ReadFile(src/executor/tools/grep.rs)
+[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。または十分な情報が揃っているなら今すぐ bot で回答してください。
+
+## Tool results
+[ツール実行結果]
+
+[#2 → ReadFile(src/main.rs)]
+```
+mod agent;
+mod color;
+mod command;
+mod executor;
+mod paths;
+mod session;
+
+use agent::debug_log::DebugLogger;
+use agent::{SessionStore, build_system_prompt, run_agent};
+use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW, use_unicode};
+use executor::CheckpointManager;
+use executor::LOG_DIR;
+use executor::tools;
+use session::CopilotSession;
+
+// #6: セクション分けされたヘルプ + #9: Ctrl+C 明記
+fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
+    let v_state = if verbose { "ON " } else { "OFF" };
+    let y_state = if auto_confirm { "ON " } else { "OFF" };
+    let d_state = if debug { "ON " } else { "OFF" };
+
+    println!("{BOLD}── コマンド ─────────────────────────────────{RESET}");
+    println!("  {BOLD}:h{RESET}       このヘルプを表示");
+    println!("  {BOLD}:v{RESET}       verboseモード切替      (現在: {BOLD}{v_state}{RESET})");
+    println!(
+        "  {BOLD}:d{RESET}       デバッグログ切替       (現在: {BOLD}{d_state}{RESET})  → .copipe_logs/debug_log"
+    );
+    println!("  {BOLD}:y{RESET}       自動確認モード切替     (現在: {BOLD}{y_state}{RESET})");
+    println!("  {BOLD}:undo{RESET}    直前のファイル変更を元に戻す");
+    println!("  {BOLD}:undo list{RESET} チェックポイント一覧を表示");
+    println!("  {BOLD}exit{RESET}     終了  (Ctrl+D でも可)");
+    println!();
+    println!("{BOLD}── タスクの書き方 ───────────────────────────{RESET}");
+    println!("  日本語でタスクを入力して Enter");
+    println!("  行末に {BOLD}\\{RESET} で複数行入力");
+    println!("  タスク末尾に {BOLD}:y{RESET} で確認を1回スキップ  例: レビューして:y");
+    println!();
+    println!("{BOLD}── キー操作 ─────────────────────────────────{RESET}");
+    println!("  {BOLD}Enter{RESET}    タスク確認プロンプトで実行");
+    println!("  {BOLD}Ctrl+C{RESET}   実行中のタスクをキャンセル（生成も停止）");
+    println!("  {BOLD}Ctrl+D{RESET}   終了");
+    println!();
+    println!("{BOLD}── 動作要件 ─────────────────────────────────{RESET}");
+    println!("  ブラウザ: Microsoft Edge または Google Chrome が必要");
+    println!("  {DIM}COPIPE_BROWSER_PATH 環境変数でパスを上書き可能{RESET}");
+    println!("  Copilot へのログイン済みセッションが必要（初回は手動ログイン）");
+    println!();
+    println!("{DIM}タスク例:{RESET}");
+    println!("{DIM}  src の構成を調べてください{RESET}");
+    println!("{DIM}  main.rs を読んで TODO を一覧にしてください{RESET}");
+    println!("{DIM}  cargo check して失敗したら修正してください{RESET}");
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    use rustyline::error::ReadlineError;
+
+    // CLI 引数パース: copipe-ai [--verbose|-v] [-y] [プロジェクトディレクトリ]
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let mut auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
+    // デバッグログはデフォルト ON（--no-debug で無効化）
+    let mut debug = !args.iter().any(|a| a == "--no-debug");
+    let root_dir = args.iter().find(|a| !a.starts_with('-')).cloned();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help(verbose, auto_confirm, debug);
+        return Ok(());
+    }
+
+    let root = match root_dir {
+        Some(ref p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir()?,
+    };
+    let root = canonicalize_clean(&root)?;
+
+    // 起動時にログを初期化（シンボリックリンク経由のルート外書き込みを防ぐ）
+    let log_dir = root.join(LOG_DIR);
+    if log_dir
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "{} はシンボリックリンクです。untrusted リポジトリによるログ外部書き込みを防ぐため起動を中止します。",
+            log_dir.display()
+        );
+    }
+    std::fs::create_dir_all(&log_dir).ok();
+    // #8: ログディレクトリの初回案内（ディレクトリが新規作成された場合）
+    let is_first_run = !log_dir.join("ai_log").exists();
+    for name in &["ai_log", "cmd_log", "browser_log"] {
+        let log_path = log_dir.join(name);
+        if log_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "{} はシンボリックリンクです。外部ファイルへのログ書き込みを防ぐため起動を中止します。",
+                log_path.display()
+            );
+        }
+        std::fs::write(&log_path, "").ok();
+    }
+
+    // チェックポイントマネージャとセッションストアを初期化
+    let mut checkpoints = CheckpointManager::new(&root);
+    let session_store = SessionStore::new(&root);
+
+    // #1: 進捗は session/mod.rs の start() 内で出力
+    let mut session = CopilotSession::start().await?;
+    session.log_dir = Some(log_dir.clone());
+
+    println!("{DIM}システムプロンプトを送信中...{RESET}");
+    session.send_raw(&build_system_prompt(&root)).await?;
+    println!("{GREEN_BOLD}✓{RESET} 準備完了\n");
+
+    // #2: バナーにモード状態を表示
+    let (tl, tr, bl, br, h, v) = if use_unicode() {
+        ("╔", "╗", "╚", "╝", "═", "║")
+    } else {
+        ("+", "+", "+", "+", "-", "|")
+    };
+    let line = h.repeat(50);
+    println!("{CYAN_BOLD}{tl}{line}{tr}{RESET}");
+    println!(
+        "{CYAN_BOLD}{v}{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}{v}{RESET}"
+    );
+    println!("{CYAN_BOLD}{bl}{line}{br}{RESET}");
+    println!("プロジェクト: {BOLD}{}{RESET}", root.display());
+    {
+        let v_state = if verbose {
+            format!("{BOLD}ON{RESET}")
+        } else {
+            format!("{DIM}OFF{RESET}")
+        };
+        let y_state = if auto_confirm {
+            format!("{BOLD}ON{RESET}")
+        } else {
+            format!("{DIM}OFF{RESET}")
+        };
+        let d_state = if debug {
+            format!("{BOLD}ON{RESET}")
+        } else {
+            format!("{DIM}OFF{RESET}")
+        };
+        println!(
+            "モード: 詳細ログ={v_state}  自動確認={y_state}  デバッグ={d_state}  {DIM}(切替: :v / :y / :d){RESET}"
+        );
+        if debug {
+            println!(
+                "{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・状態を記録します{RESET}"
+            );
+        }
+    }
+    println!("{DIM}ヘルプは :h  Ctrl+C でキャンセル  終了は exit または Ctrl+D{RESET}");
+
+    // #8: 初回起動時のみログディレクトリを案内
+    if is_first_run {
+        println!(
+            "{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log){RESET}",
+            log_dir.display()
+        );
+    }
+
+    // 前回セッションが残っていれば案内（ただし即座に復元はしない — タスク入力時に判断）
+    if session_store.exists() {
+        if let Some(ref prev) = session_store.load() {
+            println!(
+                "{YELLOW}前回の未完了セッションがあります: 「{}」（{}ターン完了済み / {}）{RESET}",
+                prev.user_task, prev.turn_count, prev.saved_at
+            );
+            println!(
+                "{DIM}同じタスクを入力すると続きから再開します。別のタスクを入力すると新規開始します。{RESET}"
+            );
+        }
+    }
+
+    let mut rl = rustyline::DefaultEditor::new()?;
+    let history_path = paths::home_dir().map(|h| h.join(".copipe_ai_history"));
+    if let Some(ref p) = history_path {
+        rl.load_history(p).ok();
+    }
+
+    'repl: loop {
+        // ── 入力フェーズ（行末 \ でマルチライン継続） ──────────────────
+        // #7: Worktree 使用中かチェックしてプロンプトに反映
+        let in_worktree = executor::tools::worktree::load_state(&root).is_some();
+        let base_prompt: &str = &{
+            let mut tags: Vec<&str> = Vec::new();
+            if in_worktree {
+                tags.push("worktree");
+            }
+            if auto_confirm {
+                tags.push("自動確認");
+            }
+            if verbose {
+                tags.push("詳細");
+            }
+            if tags.is_empty() {
+                "\n> ".to_string()
+            } else {
+                format!("\n[{}]> ", tags.join(","))
+            }
+        };
+        let mut task = String::new();
+        loop {
+            let 
+...[657 文字以降省略]
+---PROMPT END---
+[SESSION] read_files=2 done_log=14
+  read: src/lib.rs, src/main.rs
+  done: ✓ ReadFile(src/lib.rs) → ✓ ReadFile(src/executor/mod.rs) → ✓ ReadFile(src/agent/mod.rs) → ✓ ReadFile(src/executor/context.rs) → ✓ ReadFile(src/executor/tools/grep.rs)
+[TIMING] 23.67s
+---
+
+=== TURN 5/30 [2026-05-10 20:40:37 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=2.0s
+[PROMPT] 8255 chars:
+---PROMPT START---
+## Static context
+[元のタスク] 全体コードレビューして
+
+## Dynamic context
+[読み込み済みファイル（再読み不要）] src/lib.rs, src/main.rs
+[完了済みアクション]
+[Context compacted — summary of 18 earlier actions (✓18)]
+[Recent] ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
+
+## Tool results
+[ツール実行結果]
+
+[#2 → Grep(unwrap( in src)]
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/agent/session_store.rs ──
+  160:         store.save(&root, "コードレビューして", 5, &done_log, &read_files);
+  161:         assert!(store.exists());
+  162: 
+> 163:         let loaded = store.load().unwrap();
+  164:         assert_eq!(loaded.user_task, "コードレビューして");
+  165:         assert_eq!(loaded.turn_count, 5);
+  166:         assert_eq!(loaded.done_log.len(), 2);
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/command.rs ──
+  217: 
+  218:     #[test]
+  219:     fn parse_commands_accepts_add_alias() {
+> 220:         let cmds = parse_commands(r#"{"type":"add","path":"a.txt","content":"hello"}"#).unwrap();
+  221:         assert!(
+  222:             matches!(cmds.as_slice(), [AiCommand::File { path, content }] if path == "a.txt" && content == "hello")
+  223:         );
+      ···
+  227:     fn parse_commands_accepts_edit_patch_shape() {
+  228:         let cmds =
+  229:             parse_commands(r#"{"type":"edit","path":"src/main.rs","patch":"@@\n-old\n+new\n"}"#)
+> 230:                 .unwrap();
+  231:         assert!(
+  232:             matches!(cmds.as_slice(), [AiCommand::Patch { path, diff }] if path == "src/main.rs" && diff.contains("+new"))
+  233:         );
+      ···
+  235: 
+  236:     #[test]
+  237:     fn parse_commands_strips_json_prefix() {
+> 238:         let cmds = parse_commands("json [{\"type\":\"txt\",\"content\":\"ok\"}]").unwrap();
+  239:         assert!(matches!(cmds.as_slice(), [AiCommand::Txt { content }] if content == "ok"));
+  240:     }
+  241: 
+      ···
+  247:   {"type":"add","path":"tests/debug_log_tests.rs","content":"use tempfile::tempdir;\n"}
+  248: ]"#;
+  249: 
+> 250:         let cmds = parse_commands(input).unwrap();
+  251: 
+  252:         assert_eq!(cmds.len(), 3);
+  253:         assert!(matches!(cmds[0], AiCommand::ReadFile { .. }));
+      ···
+  260:         let cmds = parse_commands(
+  261:             r#"{"type":"grep","pattern":"","path":"src/agent/debug_log.rs","context_lines":0}"#,
+  262:         )
+> 263:         .unwrap();
+  264: 
+  265:         assert!(
+  266:             matches!(cmds.as_slice(), [AiCommand::ReadFile { path, offset_lines }] if path == "src/agent/debug_log.rs" && *offset_lines == 0)
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/checkpoints.rs ──
+  160:     use super::*;
+  161: 
+  162:     fn setup() -> (tempfile::TempDir, CheckpointManager) {
+> 163:         let dir = tempfile::tempdir().unwrap();
+  164:         let mgr = CheckpointManager::new(dir.path());
+  165:         (dir, mgr)
+  166:     }
+      ···
+  169:     fn test_save_and_undo() {
+  170:         let (dir, mut mgr) = setup();
+  171:         let file = dir.path().join("test.rs");
+> 172:         std::fs::write(&file, "original content").unwrap();
+  173: 
+  174:         // チェックポイント保存
+  175:         let id = mgr.save(&file, "original content", "edit");
+      ···
+  177:         assert_eq!(mgr.len(), 1);
+  178: 
+  179:         // ファイルを変更
+> 180:         std::fs::write(&file, "modified content").unwrap();
+  181: 
+  182:         // Undo で復元
+  183:         let result = mgr.undo().unwrap();
+      ···
+  180:         std::fs::write(&file, "modified content").unwrap();
+  181: 
+  182:         // Undo で復元
+> 183:         let result = mgr.undo().unwrap();
+  184:         assert!(result.is_some());
+  185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
+  186:         assert_eq!(mgr.len(), 0);
+      ···
+  182:         // Undo で復元
+  183:         let result = mgr.undo().unwrap();
+  184:         assert!(result.is_some());
+> 185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
+  186:         assert_eq!(mgr.len(), 0);
+  187:     }
+  188: 
+      ···
+  189:     #[test]
+  190:     fn test_undo_empty_returns_none() {
+  191:         let (_dir, mut mgr) = setup();
+> 192:         let result = mgr.undo().unwrap();
+  193:         assert!(result.is_none());
+  194:     }
+  195: 
+      ···
+  199:         mgr.history.clear();
+  200: 
+  201:         let file = dir.path().join("f.rs");
+> 202:         std::fs::write(&file, "x").unwrap();
+  203: 
+  204:         for _ in 0..=MAX_CHECKPOINTS {
+  205:             mgr.save(&file, "x", "edit");
+      ···
+  213:         let (dir, mut mgr) = setup();
+  214:         let file1 = dir.path().join("a.rs");
+  215:         let file2 = dir.path().join("b.rs");
+> 216:         std::fs::write(&file1, "a").unwrap();
+  217:         std::fs::write(&file2, "b").unwrap();
+  218: 
+  219:         mgr.save(&file1, "a", "write");
+      ···
+  214:         let file1 = dir.path().join("a.rs");
+  215:         let file2 = dir.path().join("b.rs");
+  216:         std::fs::write(&file1, "a").unwrap();
+> 217:         std::fs::write(&file2, "b").unwrap();
+  218: 
+  219:         mgr.save(&file1, "a", "write");
+  220:         mgr.save(&file2, "b", "edit");
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/context.rs ──
+   92: 
+   93:     #[test]
+   94:     fn rejects_windows_absolute_paths_on_all_targets() {
+>  95:         let dir = tempfile::tempdir().unwrap();
+   96:         let mut read_files = HashSet::new();
+   97:         let mut checkpoints = CheckpointManager::new(dir.path());
+   98:         let ctx = context_for(dir.path(), &mut read_files, &mut checkpoints);
+      ···
+  103: 
+  104:     #[test]
+  105:     fn rejects_windows_parent_components_on_all_targets() {
+> 106:         let dir = tempfile::tempdir().unwrap();
+  107:         let mut read_files = HashSet::new();
+  108:         let mut checkpoints = CheckpointManager::new(dir.path());
+  109:         let ctx = context_for(dir.path(), &mut read_files, &mut checkpoints);
+      ···
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/edit.rs ──
+  159:         let new = "fn hello() {\n    println!(\"hello!\");\n}";
+  160:         let result = content_after_edit(src, old, new);
+  161:         assert!(result.is_some());
+> 162:         assert!(result.unwrap().contains("hello!"));
+  163:     }
+  164: }
+
+── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/glob.rs ──
+  265: 
+  266:     #[test]
+  267:     fn test_handle_src_recursive_pattern() {
+> 268:         let dir = tempfile::tempdir().unwrap();
+  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+      ···
+  266:     #[test]
+  267:     fn test_handle_src_recursive_pattern() {
+  268:         let dir = tempfile::tempdir().unwrap();
+> 269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+      ···
+  267:     fn test_handle_src_recursive_pattern() {
+  268:         let dir = tempfile::tempdir().unwrap();
+  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+> 270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+  273: 
+      ···
+  268:         let dir = tempfile::tempdir().unwrap();
+  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+> 271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+  273: 
+  274:         let mut read_files = std::col
+...[255 文字以降省略]
+---PROMPT END---
+[SESSION] read_files=2 done_log=21
+  read: src/lib.rs, src/main.rs
+  done: ✓ Grep(panic! in src) → ✓ Grep(unsafe in src) → ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
+[TIMING] 24.63s
+---
+
+=== TURN 6/30 [2026-05-10 20:41:02 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=2.0s
+[PROMPT] 7433 chars:
+---PROMPT START---
+## Static context
+[元のタスク] 全体コードレビューして
+
+## Dynamic context
+[読み込み済みファイル（再読み不要）] src/agent/session_store.rs, src/command.rs, src/lib.rs, src/main.rs
+[完了済みアクション]
+[Context compacted — summary of 25 earlier actions (✓25)]
+[Recent] ✓ ReadFile(src/executor/tools/glob.rs) → ✓ ReadFile(src/executor/tools/grep.rs) → ✓ ReadFile(src/executor/tools/edit.rs)
+[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。または十分な情報が揃っているなら今すぐ bot で回答してください。
+
+## Tool results
+[ツール実行結果]
+
+[#2 → ReadFile(src/agent/session_store.rs)]
+```
+/// セッション保存・復元（core-internals.md §7 session.mjs を参考）
+///
+/// run_agent() の状態（read_files / done_log）をターンごとにディスクに保存する。
+/// 20ターン上限・Ctrl+C・クラッシュ後も「続きから」再開できる。
+///
+/// 保存先: ホームディレクトリ配下の .copipe_sessions/<path_hash16>/session.json
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+const SESSION_VERSION: u32 = 1;
+
+// ─── データ構造 ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionData {
+    pub version: u32,
+    pub project_dir: String, // root の絶対パス
+    pub user_task: String,
+    pub turn_count: u32,
+    pub saved_at: String,        // JST タイムスタンプ
+    pub done_log: Vec<String>,   // "✓ label" / "✗ label" の履歴
+    pub read_files: Vec<String>, // root からの相対パス
+}
+
+// ─── セッションストア ─────────────────────────────────────────────────────────
+
+pub struct SessionStore {
+    session_path: PathBuf,
+}
+
+impl SessionStore {
+    /// root に紐づいたセッションストアを作成する
+    pub fn new(root: &Path) -> Self {
+        let hash = path_hash16(root);
+        let dir = session_dir_for_hash(&hash);
+        Self {
+            session_path: dir.join("session.json"),
+        }
+    }
+
+    /// セッションデータを保存する
+    pub fn save(
+        &self,
+        root: &Path,
+        user_task: &str,
+        turn_count: u32,
+        done_log: &[String],
+        read_files_abs: &std::collections::HashSet<PathBuf>,
+    ) {
+        let read_files: Vec<String> = {
+            let mut v: Vec<String> = read_files_abs
+                .iter()
+                .filter_map(|p| p.strip_prefix(root).ok().map(|r| r.display().to_string()))
+                .collect();
+            v.sort();
+            v
+        };
+
+        let data = SessionData {
+            version: SESSION_VERSION,
+            project_dir: root.display().to_string(),
+            user_task: user_task.to_string(),
+            turn_count,
+            saved_at: crate::executor::now_timestamp(),
+            done_log: done_log.to_vec(),
+            read_files,
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&data) {
+            std::fs::write(&self.session_path, json).ok();
+        }
+    }
+
+    /// 保存済みセッションをロードする（なければ None）
+    pub fn load(&self) -> Option<SessionData> {
+        let json = std::fs::read_to_string(&self.session_path).ok()?;
+        let data: SessionData = serde_json::from_str(&json).ok()?;
+        if data.version != SESSION_VERSION {
+            return None;
+        }
+        Some(data)
+    }
+
+    /// セッションファイルを削除する（正常完了時）
+    pub fn clear(&self) {
+        std::fs::remove_file(&self.session_path).ok();
+    }
+
+    pub fn exists(&self) -> bool {
+        self.session_path.exists()
+    }
+}
+
+// ─── ユーティリティ ───────────────────────────────────────────────────────────
+
+/// セッション保存ディレクトリのパスを返す
+fn home_sessions_dir() -> PathBuf {
+    crate::paths::home_dir()
+        .map(|h| h.join(".copipe_sessions"))
+        .unwrap_or_else(|| std::env::temp_dir().join("copipe_sessions"))
+}
+
+fn session_dir_for_hash(hash: &str) -> PathBuf {
+    let primary = home_sessions_dir().join(hash);
+    if ensure_writable_dir(&primary) {
+        return primary;
+    }
+
+    let fallback = std::env::temp_dir().join("copipe_sessions").join(hash);
+    ensure_writable_dir(&fallback);
+    fallback
+}
+
+fn ensure_writable_dir(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".write_probe");
+    match std::fs::write(&probe, b"ok") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// パスを16文字の16進ハッシュに変換する（ディレクトリ名用）
+fn path_hash16(path: &Path) -> String {
+    let s = path.display().to_string();
+    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    format!("{h:016x}")
+}
+
+// ─── テスト ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_save_and_load() {
+        let root = std::env::temp_dir().join("copipe_test_sess");
+        std::fs::create_dir_all(&root).ok();
+        let store = SessionStore::new(&root);
+
+        let mut read_files = HashSet::new();
+        read_files.insert(root.join("src/main.rs"));
+        read_files.insert(root.join("src/lib.rs"));
+        let done_log = vec![
+            "✓ ListDir(src)".to_string(),
+            "✓ ReadFile(src/main.rs)".to_string(),
+        ];
+
+        store.save(&root, "コードレビューして", 5, &done_log, &read_files);
+        assert!(store.exists());
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.user_task, "コードレビューして");
+        assert_eq!(loaded.turn_count, 5);
+        assert_eq!(loaded.done_log.len(), 2);
+        assert_eq!(loaded.read_files.len(), 2);
+        assert!(loaded.read_files.iter().any(|f| f.contains("main.rs")));
+
+        store.clear();
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn test_path_hash16_is_consistent() {
+        let p = Path::new("/home/user/myproject");
+        let h1 = path_hash16(p);
+        let h2 = path_hash16(p);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+    }
+
+    #[test]
+    fn test_path_hash16_different_paths() {
+        let h1 = path_hash16(Path::new("/home/user/project_a"));
+        let h2 = path_hash16(Path::new("/home/user/project_b"));
+        assert_ne!(h1, h2);
+    }
+}
+
+```
+
+[#3 → ReadFile(src/command.rs)]
+```
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// p.txt で定義された全コマンド型
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiCommand {
+    Cmd {
+        name: String,
+        cmd: Vec<String>,
+        workdir: Option<String>,
+        timeout: u64,
+    },
+    Txt {
+        content: String,
+    },
+    File {
+        path: String,
+        content: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    DeleteFile {
+        path: String,
+    },
+    DeleteFolder {
+        path: String,
+    },
+    ReadLog {
+        filename: String,
+    },
+    ReadFile {
+        path: String,
+        #[serde(default)]
+        offset_lines: usize,
+    },
+    ListDir {
+        path: String,
+    },
+    Grep {
+        pattern: String,
+        path: String,
+        #[serde(default = "default_context_lines")]
+        context_lines: usize,
+        #[serde(default)]
+        file_glob: Option<String>,
+    },
+    Glob {
+        pattern: String,
+    },
+    Edit {
+        path: String,
+        old_string: String,
+        new_string: String,
+    },
+    AskUser {
+        question: String,
+        #[serde(default)]
+        hint: Option<String>,
+    },
+    TodoWrite {
+        todos: Vec<TodoItem>,
+    },
+    MultiEdit {
+        path: String,
+        edits: Vec<EditPair>,
+    },
+    WebFetch {
+        url: String,
+
+[出力が長すぎるため一部を省略しました]
+
+[残り 5 件の結果を省略（合計文字数制限）。次のターンで続きを確認してください]
+---PROMPT END---
+[SESSION] read_files=4 done_log=28
+  read: src/agent/session_store.rs, src/command.rs, src/lib.rs, src/main.rs
+  done: ✓ ReadFile(src/executor/checkpoints.rs) → ✓ ReadFile(src/executor/context.rs) → ✓ ReadFile(src/executor/tools/glob.rs) → ✓ ReadFile(src/executor/tools/grep.rs) → ✓ ReadFile(src/executor/tools/edit.rs)
+[TIMING] 39.81s
+---

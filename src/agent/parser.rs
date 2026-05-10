@@ -1,4 +1,4 @@
-use crate::command::{parse_commands, AiCommand};
+use crate::command::{AiCommand, parse_commands};
 
 pub(super) const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
 単一コマンド:
@@ -41,8 +41,14 @@ fn sanitize_json(s: &str) -> String {
             continue;
         }
         match ch {
-            '\\' if in_string => { out.push(ch); escaped = true; }
-            '"' => { in_string = !in_string; out.push(ch); }
+            '\\' if in_string => {
+                out.push(ch);
+                escaped = true;
+            }
+            '"' => {
+                in_string = !in_string;
+                out.push(ch);
+            }
             '\n' if in_string => out.push_str("\\n"),
             '\r' if in_string => out.push_str("\\r"),
             '\t' if in_string => out.push_str("\\t"),
@@ -57,8 +63,7 @@ pub(super) fn parse_blocks(blocks: &[String]) -> (Vec<AiCommand>, Vec<String>) {
     let mut errors = Vec::new();
     for b in blocks {
         // まずそのままパース、失敗したらサニタイズして再試行
-        let result = parse_commands(b)
-            .or_else(|_| parse_commands(&sanitize_json(b)));
+        let result = parse_commands(b).or_else(|_| parse_commands(&sanitize_json(b)));
         match result {
             Ok(cmds) => commands.extend(cmds),
             Err(e) => errors.push(format!(

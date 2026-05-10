@@ -2,6 +2,17 @@ use super::dom::{ai_message_count, read_nth_ai_text, scroll_to_nth_ai_message};
 use std::path::Path;
 use std::time::Duration;
 
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_ASCII: &[&str] = &["-", "\\", "|", "/"];
+
+fn spin(tick: u64) -> &'static str {
+    if crate::color::use_unicode() {
+        SPINNER[(tick as usize) % SPINNER.len()]
+    } else {
+        SPINNER_ASCII[(tick as usize) % SPINNER_ASCII.len()]
+    }
+}
+
 /// 人間らしいアイドルマウス動作を発火する（bot 検知回避）
 async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
     let seed = std::time::SystemTime::now()
@@ -20,7 +31,8 @@ async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
         document.dispatchEvent(new MouseEvent('mousemove', {{
             bubbles: true, clientX: {}, clientY: {}
         }}));"#,
-        x + dx, y + dy
+        x + dx,
+        y + dy
     );
     page.evaluate_expression(&js).await.ok();
 }
@@ -28,12 +40,17 @@ async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
 fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
     if let Some(dir) = log_dir {
         let path = dir.join("browser_log");
-        if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             return;
         }
         use std::io::Write as IoWrite;
         if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true).append(true)
+            .create(true)
+            .append(true)
             .open(&path)
         {
             let _ = writeln!(f, "{msg}\n---");
@@ -66,7 +83,13 @@ pub(super) async fn detect_copilot_block(page: &chromiumoxide::Page) -> Option<S
         .await
         .ok()
         .and_then(|r| r.value().cloned())
-        .and_then(|v| if v.is_null() { None } else { v.as_str().map(|s| s.to_string()) })
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        })
 }
 
 pub(super) async fn wait_for_ai_message_count(
@@ -80,8 +103,10 @@ pub(super) async fn wait_for_ai_message_count(
     let start = tokio::time::Instant::now();
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(7);
+    let mut tick: u64 = 0;
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
+        tick += 1;
         if ai_message_count(page).await.unwrap_or(0) >= n {
             return Ok(());
         }
@@ -91,13 +116,14 @@ pub(super) async fn wait_for_ai_message_count(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0) as u64;
-            wiggle_at = tokio::time::Instant::now()
-                + Duration::from_secs(5 + seed % 8); // 5〜12秒ごと
+            wiggle_at = tokio::time::Instant::now() + Duration::from_secs(5 + seed % 8); // 5〜12秒ごと
             idle_mouse_wiggle(page).await;
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!();
-            anyhow::bail!("Copilot が応答しませんでした。しばらく待ってから同じタスクを再入力してください");
+            anyhow::bail!(
+                "Copilot が応答しませんでした。しばらく待ってから同じタスクを再入力してください"
+            );
         }
         if tokio::time::Instant::now() >= check_block_at {
             check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -125,12 +151,14 @@ pub(super) async fn wait_for_ai_message_count(
             write_diag_log(log_dir, &format!("[診断] {input_state}"));
             if let Some(reason) = detect_copilot_block(page).await {
                 eprintln!("\n応答が停止しました。同じタスクを再入力してください");
-                anyhow::bail!("Copilot との接続が切れました（{reason}）。同じタスクを再入力してください");
+                anyhow::bail!(
+                    "Copilot との接続が切れました（{reason}）。同じタスクを再入力してください"
+                );
             }
         }
         let secs = start.elapsed().as_secs();
         // \r で上書きする進捗表示（診断 eprintln! と競合しないよう stderr flush）
-        eprint!("\r  応答待機中 {secs}s          ");
+        eprint!("\r  {} 応答待機中 {secs}s          ", spin(tick));
         std::io::stderr().flush().ok();
     }
 }
@@ -148,17 +176,19 @@ pub(super) async fn wait_for_stable_text(
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(10);
 
-    const POLL_MS: u64 = 600;
-    const STABLE_NEEDED: u64 = 3; // 600ms × 3 = 1.8秒安定を要求
-    const SETTLE_MS: u64 = 800;   // 安定確認後の追加バッファ
+    const POLL_MS: u64 = 1_000;
+    const STABLE_NEEDED: u64 = 7; // 1000ms × 7 = 7秒安定を要求
+    const SETTLE_MS: u64 = 3_000; // 安定確認後の追加バッファ → 合計 ~10秒
+    let mut tick: u64 = 0;
 
     loop {
         tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+        tick += 1;
         let text = read_nth_ai_text(page, n).await;
 
         if !text.is_empty() && text == last {
             stable += 1;
-            eprint!("\r  応答受信中...          ");
+            eprint!("\r  {} 確定中 ({}/{STABLE_NEEDED})          ", spin(tick), stable);
             std::io::stderr().flush().ok();
             if stable >= STABLE_NEEDED {
                 tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
@@ -166,14 +196,12 @@ pub(super) async fn wait_for_stable_text(
                 return Ok(text);
             }
         } else if !text.is_empty() {
-            eprint!("\r生成中... ({} 文字)          ", text.len());
+            eprint!("\r  {} 生成中... {} 文字          ", spin(tick), text.len());
             std::io::stderr().flush().ok();
             stable = 0;
             last = text;
-            let _ = tokio::time::timeout(
-                Duration::from_secs(3),
-                scroll_to_nth_ai_message(page, n),
-            ).await;
+            let _ = tokio::time::timeout(Duration::from_secs(3), scroll_to_nth_ai_message(page, n))
+                .await;
         }
 
         // アイドルマウス動作（生成中も自然な操作感を維持）
@@ -201,10 +229,14 @@ pub(super) async fn wait_for_stable_text(
                 if !last.is_empty() {
                     // 部分レスポンスで続行するが、ユーザーに通知を返す
                     // 呼び出し元が tool_results に混ぜて表示できるよう、テキストに警告を付加
-                    let warned = format!("{last}\n\n⚠ Copilot がレート制限/ブロックを報告しました（{reason}）。応答が途中の可能性があります。");
+                    let warned = format!(
+                        "{last}\n\n⚠ Copilot がレート制限/ブロックを報告しました（{reason}）。応答が途中の可能性があります。"
+                    );
                     return Ok(warned);
                 }
-                anyhow::bail!("Copilot との接続が切れました（{reason}）。同じタスクを再入力してください");
+                anyhow::bail!(
+                    "Copilot との接続が切れました（{reason}）。同じタスクを再入力してください"
+                );
             }
         }
     }

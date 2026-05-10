@@ -33,9 +33,9 @@ impl RateLimiter {
     pub fn new() -> Self {
         Self {
             consecutive_issues: 0,
-            base_ms: 5_000,        // 5秒ベース（従来 2秒）
-            max_ms: 20_000,        // 最大 20秒（従来 14秒）
-            human_pause_every: 4,  // 4ターンに1回の長停止（従来 8ターン）
+            base_ms: 1_500,
+            max_ms: 8_000,
+            human_pause_every: 8,
             turn: 0,
         }
     }
@@ -68,17 +68,17 @@ impl RateLimiter {
         let jitter = seed % self.base_ms.max(1);
         let backoff = (exp + jitter).min(self.max_ms);
 
-        // 人間らしい長停止: N ターンに1回 8〜18秒追加（従来 5〜10秒）
+        // 周期的な小休止。通常ターンの体感速度を優先し、長すぎる停止は避ける。
         let human_extra = if self.turn > 0
             && self.human_pause_every > 0
             && self.turn % self.human_pause_every as u32 == 0
         {
-            8_000 + seed % 10_000 // 8〜18秒
+            2_000 + seed % 3_000
         } else {
             0
         };
 
-        (backoff + human_extra).min(self.max_ms + 10_000)
+        (backoff + human_extra).min(self.max_ms + 5_000)
     }
 
     pub fn consecutive_issues(&self) -> u32 {
@@ -102,28 +102,24 @@ mod tests {
     #[test]
     fn test_no_issues_stays_low() {
         let rl = RateLimiter::new();
-        // 問題なしのとき delay は base + jitter 以内（長停止除く）
-        // turn=0 は long pause 対象外
         let delay = rl.next_delay_ms();
-        assert!(delay <= 14_000 + 10_000, "delay={delay} is too large");
+        assert!(delay <= 3_000, "delay={delay} is too large");
     }
 
     #[test]
     fn test_exponential_backoff() {
         let mut rl = RateLimiter::new();
-        // issues=0: base=2000, issues=1: 4000, issues=2: 8000
         assert_eq!(rl.consecutive_issues(), 0);
 
         rl.record_issue();
         assert_eq!(rl.consecutive_issues(), 1);
-        let delay1 = rl.base_ms.saturating_mul(1u64 << 1); // 4000
-        // next_delay_ms は jitter を含むが指数部分は正しいはず
+        let delay1 = rl.base_ms.saturating_mul(1u64 << 1);
         let d = rl.next_delay_ms();
         assert!(d >= delay1, "delay={d} should be >= {delay1}");
 
         rl.record_issue();
         assert_eq!(rl.consecutive_issues(), 2);
-        let delay2 = rl.base_ms.saturating_mul(1u64 << 2); // 8000
+        let delay2 = rl.base_ms.saturating_mul(1u64 << 2);
         let d = rl.next_delay_ms();
         assert!(d >= delay2, "delay={d} should be >= {delay2}");
     }
@@ -131,11 +127,12 @@ mod tests {
     #[test]
     fn test_max_cap() {
         let mut rl = RateLimiter::new();
-        for _ in 0..10 { rl.record_issue(); }
+        for _ in 0..10 {
+            rl.record_issue();
+        }
         assert_eq!(rl.consecutive_issues(), 5); // 5 でキャップ
-        // max_ms 以内（長停止込みでも 24000ms 以内）
         let d = rl.next_delay_ms();
-        assert!(d <= rl.max_ms + 10_000, "delay={d} exceeded cap");
+        assert!(d <= rl.max_ms + 5_000, "delay={d} exceeded cap");
     }
 
     #[test]
@@ -158,9 +155,12 @@ mod tests {
 
     #[test]
     fn test_human_pause_period() {
-        let mut rl = RateLimiter { human_pause_every: 4, turn: 4, ..RateLimiter::new() };
+        let rl = RateLimiter {
+            human_pause_every: 8,
+            turn: 8,
+            ..RateLimiter::new()
+        };
         let d = rl.next_delay_ms();
-        // turn=4 は long pause 対象なので base + jitter + 5000〜10000 ms
-        assert!(d >= 5_000, "turn=4 should trigger human pause, delay={d}");
+        assert!(d >= 3_500, "turn=8 should trigger human pause, delay={d}");
     }
 }

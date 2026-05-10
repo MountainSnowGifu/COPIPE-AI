@@ -12,7 +12,8 @@ pub fn free_port() -> u16 {
 
 fn browser_candidates() -> Vec<PathBuf> {
     if let Ok(path) = std::env::var("COPIPE_BROWSER_PATH") {
-        if !path.trim().is_empty() {
+        let path = path.trim().trim_matches('"');
+        if !path.is_empty() {
             return vec![PathBuf::from(path)];
         }
     }
@@ -40,12 +41,10 @@ fn browser_candidates() -> Vec<PathBuf> {
 
 fn browser_profile_dir() -> PathBuf {
     let base = if cfg!(target_os = "windows") {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
+        crate::paths::local_data_dir()
     } else {
-        std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(".config"))
+        crate::paths::home_dir()
+            .map(|home| home.join(".config"))
             .unwrap_or_else(|| std::env::temp_dir().join("copipe-ai"))
     };
 
@@ -83,8 +82,6 @@ fn build_browser_command(candidate: &Path, port: u16, profile_dir: &Path) -> Com
         .arg("--disable-backgrounding-occluded-windows")
         .arg("--disable-renderer-backgrounding")
         .arg("--disable-background-timer-throttling")
-        .env("LANG", "ja_JP.UTF-8")
-        .env("LC_ALL", "ja_JP.UTF-8")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
@@ -93,7 +90,9 @@ fn build_browser_command(candidate: &Path, port: u16, profile_dir: &Path) -> Com
             .arg("--no-sandbox")
             .arg("--disable-dev-shm-usage")
             .env("DISPLAY", ":0")
-            .env("WAYLAND_DISPLAY", "wayland-0");
+            .env("WAYLAND_DISPLAY", "wayland-0")
+            .env("LANG", "ja_JP.UTF-8")
+            .env("LC_ALL", "ja_JP.UTF-8");
     }
 
     command

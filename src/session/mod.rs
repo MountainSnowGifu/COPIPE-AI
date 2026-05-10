@@ -12,7 +12,9 @@ use std::process::Child;
 use std::time::Duration;
 use watchdog::{wait_for_ai_message_count, wait_for_stable_text};
 
-pub(crate) use dom::{ai_message_count, get_codeblocks_from_dom, page_diagnostic, read_nth_ai_text};
+pub(crate) use dom::{
+    ai_message_count, get_codeblocks_from_dom, page_diagnostic, read_nth_ai_text,
+};
 
 // ─── ユーティリティ ───────────────────────────────────────────────────────────
 
@@ -80,7 +82,12 @@ impl CopilotSession {
         let mut edge = launch_edge(port)?;
         let result = Self::init(port, &mut edge).await;
         match result {
-            Ok((page, handle)) => Ok(Self { page, edge, handle, log_dir: None }),
+            Ok((page, handle)) => Ok(Self {
+                page,
+                edge,
+                handle,
+                log_dir: None,
+            }),
             Err(e) => {
                 edge.kill().ok();
                 edge.wait().ok();
@@ -176,7 +183,8 @@ impl CopilotSession {
 
         // テキスト入力: React setter を主軸にしつつ追加イベントで React state を確実に更新
         let js_str = serde_json::to_string(prompt)?;
-        page.evaluate_expression(&format!(r#"
+        page.evaluate_expression(&format!(
+            r#"
             (function() {{
                 const el = document.querySelector('#userInput');
                 if (!el) return 'not found';
@@ -198,11 +206,14 @@ impl CopilotSession {
                 }} catch(_) {{}}
                 return 'react_setter_ok';
             }})()
-        "#)).await?;
+        "#
+        ))
+        .await?;
         tokio::time::sleep(jitter(900, 700)).await;
 
         // Enter キー（Shift/Alt/Ctrl なし、より自然なイベントオブジェクト）
-        page.evaluate_expression(r#"
+        page.evaluate_expression(
+            r#"
             (function() {
                 const el = document.querySelector('#userInput');
                 if (!el) return;
@@ -215,13 +226,17 @@ impl CopilotSession {
                 el.dispatchEvent(new KeyboardEvent('keypress', {...base, charCode:13}));
                 el.dispatchEvent(new KeyboardEvent('keyup',    base));
             })()
-        "#).await?;
+        "#,
+        )
+        .await?;
         tokio::time::sleep(jitter(400, 250)).await;
 
         // 入力欄がまだ空でなければ送信ボタンをフォールバッククリック（二重送信防止）
         let target = baseline + 1;
         let input_still_has_text = page
-            .evaluate_expression(r#"(document.querySelector('#userInput')?.value?.length ?? 0) > 0"#)
+            .evaluate_expression(
+                r#"(document.querySelector('#userInput')?.value?.length ?? 0) > 0"#,
+            )
             .await
             .ok()
             .and_then(|r| r.value().and_then(|v| v.as_bool()))
@@ -273,9 +288,17 @@ impl CopilotSession {
             // フォールバック詳細はログファイルのみ（端末には出さない）
             if let Some(ref ld) = self.log_dir {
                 let log_path = ld.join("browser_log");
-                if !log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                if !log_path
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
                     use std::io::Write as IoWrite;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
                         let _ = writeln!(f, "[送信フォールバック] {click_result}\n---");
                     }
                 }
@@ -289,7 +312,8 @@ impl CopilotSession {
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
             scroll_to_nth_ai_message(page, target),
-        ).await;
+        )
+        .await;
         // 応答受信後の「読み返し」自然遅延（bot 検知回避）
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -303,7 +327,10 @@ impl CopilotSession {
     /// Copilot の生成を停止する（Ctrl+C キャンセル時に呼ぶ）。
     /// 停止ボタンが見つからない場合は Escape キーを送信してフォールバック。
     pub async fn stop_generation(&self) {
-        let result = self.page.evaluate_expression(r#"
+        let result = self
+            .page
+            .evaluate_expression(
+                r#"
             (function() {
                 // 生成停止ボタンを探してクリック
                 const selectors = [
@@ -324,7 +351,9 @@ impl CopilotSession {
                 }));
                 return 'escape_sent';
             })()
-        "#).await;
+        "#,
+            )
+            .await;
         if let Ok(r) = result {
             if let Some(v) = r.value() {
                 eprintln!("[停止] {}", v.as_str().unwrap_or(""));

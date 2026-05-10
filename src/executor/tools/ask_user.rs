@@ -12,7 +12,11 @@ pub async fn handle(question: &str, hint: &Option<String>) -> ToolResult {
 
     // 質問をユーザーに表示
     println!();
-    println!("{}[AI 質問]{} {question}", crate::color::CYAN_BOLD, crate::color::RESET);
+    println!(
+        "{}[AI 質問]{} {question}",
+        crate::color::CYAN_BOLD,
+        crate::color::RESET
+    );
     if let Some(h) = hint {
         println!("{}  ヒント: {h}{}", crate::color::DIM, crate::color::RESET);
     }
@@ -35,9 +39,9 @@ pub async fn handle(question: &str, hint: &Option<String>) -> ToolResult {
     // §5 llm-prompts.md 準拠: Claude Code と同じ定型文を使う
     let output = match result {
         Ok(Ok(s)) if !s.is_empty() => s,
-        Ok(Ok(_))  => "[non-interactive: no user input available]".to_string(),
+        Ok(Ok(_)) => "[non-interactive: no user input available]".to_string(),
         Ok(Err(_)) => "[non-interactive: no user input available]".to_string(),
-        Err(_)     => "[timeout: no response]".to_string(),
+        Err(_) => "[timeout: no response]".to_string(),
     };
 
     ToolResult::new("AskUser", output)

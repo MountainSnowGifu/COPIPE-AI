@@ -1,17 +1,17 @@
 use super::context::{build_context_header, summarize_for_display};
 use super::debug_log::DebugLogger;
 use super::log::{write_ai_log, write_browser_log};
-use super::parser::parse_blocks;
+use super::parser::{SCHEMA_HINT, parse_blocks};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{SessionData, SessionStore};
 use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET, YELLOW};
 use crate::command::AiCommand;
 use crate::command::TodoStatus;
-use crate::executor::tools::{todo_write, worktree};
 use crate::executor::errors::is_error_output;
 use crate::executor::pre_hooks::is_destructive_tool;
-use crate::executor::{execute, format_tool_results, CheckpointManager, ToolResult};
-use crate::session::{ai_message_count, get_codeblocks_from_dom, read_nth_ai_text, CopilotSession};
+use crate::executor::tools::{todo_write, worktree};
+use crate::executor::{CheckpointManager, ToolResult, execute, format_tool_results};
+use crate::session::{CopilotSession, ai_message_count, get_codeblocks_from_dom, read_nth_ai_text};
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -41,23 +41,30 @@ async fn filter_by_permission(
     }
 
     // 破壊的操作があるか確認
-    let destructive_summary: Vec<(usize, String)> = commands.iter()
+    let destructive_summary: Vec<(usize, String)> = commands
+        .iter()
         .enumerate()
         .filter_map(|(i, cmd)| {
             let (tool, label) = match cmd {
-                AiCommand::File        { path, .. }  => ("write_file", format!("WriteFile({path})")),
-                AiCommand::Edit        { path, .. }  => ("edit",       format!("Edit({path})")),
-                AiCommand::MultiEdit   { path, .. }  => ("multi_edit", format!("MultiEdit({path})")),
-                AiCommand::Patch       { path, .. }  => ("patch",      format!("Patch({path})")),
-                AiCommand::DeleteFile  { path }      => ("delete_file",format!("DeleteFile({path})")),
-                AiCommand::Cmd         { name, cmd, .. } =>
-                    ("cmd", format!("Cmd({name}: {})", cmd.join(" "))),
-                AiCommand::EnterWorktree             => ("enter_worktree", "EnterWorktree".to_string()),
-                AiCommand::ExitWorktree { action, .. } =>
-                    ("exit_worktree", format!("ExitWorktree(action={action})")),
+                AiCommand::File { path, .. } => ("write_file", format!("WriteFile({path})")),
+                AiCommand::Edit { path, .. } => ("edit", format!("Edit({path})")),
+                AiCommand::MultiEdit { path, .. } => ("multi_edit", format!("MultiEdit({path})")),
+                AiCommand::Patch { path, .. } => ("patch", format!("Patch({path})")),
+                AiCommand::DeleteFile { path } => ("delete_file", format!("DeleteFile({path})")),
+                AiCommand::Cmd { name, cmd, .. } => {
+                    ("cmd", format!("Cmd({name}: {})", cmd.join(" ")))
+                }
+                AiCommand::EnterWorktree => ("enter_worktree", "EnterWorktree".to_string()),
+                AiCommand::ExitWorktree { action, .. } => {
+                    ("exit_worktree", format!("ExitWorktree(action={action})"))
+                }
                 _ => return None,
             };
-            if is_destructive_tool(tool) { Some((i, label)) } else { None }
+            if is_destructive_tool(tool) {
+                Some((i, label))
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -89,7 +96,9 @@ async fn filter_by_permission(
         let skip_indices: std::collections::HashSet<usize> =
             destructive_summary.iter().map(|(i, _)| *i).collect();
         println!("  \x1b[2m破壊的操作をスキップしました（読み取り操作は継続）\x1b[0m");
-        commands.into_iter().enumerate()
+        commands
+            .into_iter()
+            .enumerate()
             .filter(|(i, _)| !skip_indices.contains(i))
             .map(|(_, cmd)| cmd)
             .collect()
@@ -185,9 +194,10 @@ fn determine_outcome(
             "\n今すぐ `bot` コマンドで回答を出力してください。省略せず完全な内容を含めること。\
             \n```json\n{\"type\": \"bot\", \"message\": \"（完全な回答をここに）\"}\n```"
         } else {
-            "\nタスクが完了していれば `bot` コマンドで完全な回答を返してください（省略不可）：\
-            \n```json\n{\"type\": \"bot\", \"message\": \"（完全な回答をここに）\"}\n```\
-            \nまだ必要なツールがあれば read_file / list_dir / cmd などを実行してください。"
+            "\n**必ず ```json コードブロックで** 次のアクションを記述してください。\
+            \nタスクが完了なら:\n```json\n{\"type\": \"bot\", \"message\": \"（完全な回答）\"}\n```\
+            \nまだ作業がある場合は read_file / grep / edit 等のコマンドをJSONで返してください。\
+            \nプレーンテキストのみの返答は受け付けられません。"
         };
         return TurnOutcome::NudgeForJson {
             prompt: format!("{ctx}\n\n{file_hint}{action_hint}"),
@@ -205,13 +215,17 @@ fn determine_outcome(
     // 通常の継続：ツール結果を次のプロンプトに組み込む
     TurnOutcome::Continue {
         // system_prompt.md §「動的コンテキストの形式」に準拠したセクション構造
-        prompt: format!("{ctx}\n\n## Tool results\n{}", format_tool_results(tool_results)),
+        prompt: format!(
+            "{ctx}\n\n## Tool results\n{}",
+            format_tool_results(tool_results)
+        ),
     }
 }
 
 fn read_file_hint(read_files: &HashSet<PathBuf>, root: &Path) -> String {
     if read_files.is_empty() {
-        return "まだファイルを読み込んでいません。read_file コマンドでファイルを読んでください。".to_string();
+        return "まだファイルを読み込んでいません。read_file コマンドでファイルを読んでください。"
+            .to_string();
     }
 
     let mut files: Vec<String> = read_files
@@ -221,6 +235,20 @@ fn read_file_hint(read_files: &HashSet<PathBuf>, root: &Path) -> String {
         .collect();
     files.sort();
     format!("読み込み済みのファイル（再読不要）: {}。", files.join(", "))
+}
+
+fn build_initial_prompt(user_task: &str) -> String {
+    if task_requires_review_output(user_task) {
+        return format!(
+            "{user_task}\n\n\
+            [効率化ヒント]\n\
+            - レビュー対象ファイルが依頼文から明確なら、空 grep を挟まず直接 read_file してください。\n\
+            - grep を使う場合は、必ず空でない具体的な pattern を指定してください。\n\
+            - 調査が終わったら、bot の message に具体的な指摘・根拠・改善案を省略せず書いてください。"
+        );
+    }
+
+    user_task.to_string()
 }
 
 fn task_requires_file_update(task: &str) -> bool {
@@ -262,7 +290,10 @@ fn is_placeholder_review_message(message: &str) -> bool {
         "読み込みが完了",
         "作業ステップ",
     ];
-    let placeholder_hits = placeholder_phrases.iter().filter(|p| m.contains(**p)).count();
+    let placeholder_hits = placeholder_phrases
+        .iter()
+        .filter(|p| m.contains(**p))
+        .count();
     let concrete_markers = [
         "問題",
         "原因",
@@ -296,7 +327,12 @@ async fn get_commands(
     prompt: &str,
     verbose: bool,
 ) -> anyhow::Result<(Vec<AiCommand>, Vec<String>)> {
-    write_browser_log(root, &format!("before send_raw: prompt_len={}", prompt.len()), session).await;
+    write_browser_log(
+        root,
+        &format!("before send_raw: prompt_len={}", prompt.len()),
+        session,
+    )
+    .await;
     match tokio::time::timeout(Duration::from_secs(210), session.send_raw(prompt)).await {
         Ok(Ok(())) => {
             write_browser_log(root, "after send_raw: ok", session).await;
@@ -323,23 +359,39 @@ async fn get_commands(
         let mut last = get_codeblocks_from_dom(&session.page, n).await;
         for attempt in 1..=3u32 {
             let (_, errs) = parse_blocks(&last);
-            if !errs.iter().any(|e| e.contains("EOF")) { break; }
-            if verbose { eprintln!("{DIM}[再取得中 {attempt}/3]{RESET}"); }
+            if !errs.iter().any(|e| e.contains("EOF")) {
+                break;
+            }
+            if verbose {
+                eprintln!("{DIM}[再取得中 {attempt}/3]{RESET}");
+            }
             tokio::time::sleep(Duration::from_secs(attempt as u64 * 2)).await;
             let refreshed = get_codeblocks_from_dom(&session.page, n).await;
-            if refreshed != last { last = refreshed; }
+            if refreshed != last {
+                last = refreshed;
+            }
         }
         last
     };
 
     if blocks.is_empty() {
-        if verbose { eprintln!("{DIM}[応答再要求]{RESET}"); }
+        if verbose {
+            eprintln!("{DIM}[応答再要求]{RESET}");
+        }
         let first_text = read_nth_ai_text(&session.page, n).await;
         write_browser_log(root, "no JSON code block in latest AI message", session).await;
-        if let Err(e) = session.send_raw(
-            "次の作業ステップを JSON スキーマ形式で記述してください。\
-            例：\n```json\n{\"type\": \"list_dir\", \"path\": \".\"}\n```"
-        ).await {
+        if let Some(block) = plain_json_block(&first_text) {
+            let parsed = parse_blocks(&[block.to_string()]);
+            if !parsed.0.is_empty() || parsed.1.is_empty() {
+                return Ok(parsed);
+            }
+        }
+        if let Err(e) = session
+            .send_raw(&format!(
+                "JSONコードブロックが見つかりませんでした。次のアクションを必ず ```json ... ``` で出力してください。\n\n{SCHEMA_HINT}"
+            ))
+            .await
+        {
             write_browser_log(root, &format!("retry send_raw error: {e}"), session).await;
             return Err(e);
         }
@@ -351,16 +403,30 @@ async fn get_commands(
             if let Some(message) = substantive_plain_text_response(&retry_text)
                 .or_else(|| substantive_plain_text_response(&first_text))
             {
-                return Ok((vec![AiCommand::Bot {
-                    message: Some(message),
-                    content: None,
-                }], Vec::new()));
+                return Ok((
+                    vec![AiCommand::Bot {
+                        message: Some(message),
+                        content: None,
+                    }],
+                    Vec::new(),
+                ));
             }
         }
         return Ok(parse_blocks(&blocks2));
     }
 
     Ok(parse_blocks(&blocks))
+}
+
+fn plain_json_block(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        Some(trimmed)
+    } else {
+        None
+    }
 }
 
 fn substantive_plain_text_response(text: &str) -> Option<String> {
@@ -397,7 +463,9 @@ pub async fn run_agent(
     let mut dbg = DebugLogger::new(root, debug);
     // 未完了の todo があれば冒頭に表示（前回の続きを把握するため）
     let existing_todos = todo_write::load(root);
-    let has_pending = existing_todos.iter().any(|t| t.status != TodoStatus::Completed);
+    let has_pending = existing_todos
+        .iter()
+        .any(|t| t.status != TodoStatus::Completed);
     if has_pending {
         println!("{}", todo_write::format_todos(&existing_todos));
         println!();
@@ -415,15 +483,21 @@ pub async fn run_agent(
 
     // 前回セッションから状態を復元（または新規開始）
     let (mut prompt, mut read_files, mut done_log) = if let Some(ref data) = resume {
-        let read_files: HashSet<PathBuf> = data.read_files.iter()
-            .map(|rel| root.join(rel))
-            .collect();
+        let read_files: HashSet<PathBuf> =
+            data.read_files.iter().map(|rel| root.join(rel)).collect();
         let done_log = data.done_log.clone();
 
         // #6: 再開時に done_log を表示してユーザーが状況を把握できるようにする
         if !done_log.is_empty() {
             println!("{DIM}── 前回の完了済み操作 ──{RESET}");
-            for item in done_log.iter().rev().take(5).collect::<Vec<_>>().into_iter().rev() {
+            for item in done_log
+                .iter()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
                 if item.starts_with('✓') {
                     println!("  {GREEN}{item}{RESET}");
                 } else {
@@ -444,7 +518,7 @@ pub async fn run_agent(
         );
         (resume_prompt, read_files, done_log)
     } else {
-        (user_task.to_string(), HashSet::new(), Vec::new())
+        (build_initial_prompt(user_task), HashSet::new(), Vec::new())
     };
 
     let mut consecutive_txt = 0u32;
@@ -461,7 +535,6 @@ pub async fn run_agent(
     });
 
     'agent: for turn in 0..MAX_TURNS {
-
         total_turns += 1;
         rate_limiter.advance();
         dbg.turn_start(turn, MAX_TURNS);
@@ -473,7 +546,10 @@ pub async fn run_agent(
             if verbose {
                 let issues = rate_limiter.consecutive_issues();
                 if issues > 0 {
-                    eprintln!("{DIM}待機 {:.1}秒 (バックオフ lv.{issues}){RESET}", wait_ms as f64 / 1000.0);
+                    eprintln!(
+                        "{DIM}待機 {:.1}秒 (バックオフ lv.{issues}){RESET}",
+                        wait_ms as f64 / 1000.0
+                    );
                 } else {
                     eprintln!("{DIM}待機 {:.1}秒...{RESET}", wait_ms as f64 / 1000.0);
                 }
@@ -535,29 +611,136 @@ pub async fn run_agent(
             parse_error_count += 1;
             let hint = if parse_error_count >= 2 {
                 "\n  ヒント: タスクをより具体的に書くか、短い指示（例: list_dir src）から始めてみてください"
-            } else { "" };
-            println!("{YELLOW}応答からコマンドを取得できませんでした。タスクを再入力してください。{hint}{RESET}");
+            } else {
+                ""
+            };
+            println!(
+                "{YELLOW}応答からコマンドを取得できませんでした。タスクを再入力してください。{hint}{RESET}"
+            );
             return Ok(false);
         }
 
+        // ── 1.5 実行前に AI の計画を表示 ──────────────────────────────────────
+        // AI の txt コメントを先行表示（before tools run）
+        let txt_lines: Vec<&str> = commands
+            .iter()
+            .filter_map(|c| {
+                if let AiCommand::Txt { content } = c {
+                    Some(content.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !txt_lines.is_empty() {
+            println!(
+                "  {CYAN_BOLD}┌─ AIの判断 {RESET}{CYAN_BOLD}─────────────────────────────────────{RESET}"
+            );
+            for line in &txt_lines {
+                println!("  {CYAN_BOLD}│{RESET} {line}");
+            }
+            println!("  {CYAN_BOLD}└────────────────────────────────────────────{RESET}");
+        }
+        // 実行予定ツールの一覧（txt/bot 以外）
+        let planned: Vec<String> = commands
+            .iter()
+            .filter_map(|c| match c {
+                AiCommand::ReadFile { path, offset_lines } => Some(if *offset_lines > 0 {
+                    format!("read_file {path} (続き)")
+                } else {
+                    format!("read_file {path}")
+                }),
+                AiCommand::ListDir { path } => Some(format!("list_dir {path}")),
+                AiCommand::Glob { pattern } => Some(format!("glob {pattern}")),
+                AiCommand::Grep { pattern, path, .. } => {
+                    Some(format!("grep \"{pattern}\" ({path})"))
+                }
+                AiCommand::File { path, .. } => Some(format!("write_file {path}")),
+                AiCommand::Edit { path, .. } => Some(format!("edit {path}")),
+                AiCommand::MultiEdit { path, .. } => Some(format!("multi_edit {path}")),
+                AiCommand::Patch { path, .. } => Some(format!("patch {path}")),
+                AiCommand::DeleteFile { path } => Some(format!("delete_file {path}")),
+                AiCommand::Cmd { name, cmd, .. } => Some(if name.is_empty() {
+                    format!("cmd {}", cmd.join(" "))
+                } else {
+                    format!("cmd [{name}] {}", cmd.join(" "))
+                }),
+                AiCommand::AskUser { question, .. } => Some(format!(
+                    "ask_user: {}",
+                    question.chars().take(60).collect::<String>()
+                )),
+                AiCommand::EnterWorktree => Some("enter_worktree".to_string()),
+                AiCommand::ExitWorktree { action, .. } => Some(format!("exit_worktree ({action})")),
+                AiCommand::TodoWrite { .. } => Some("todo_write".to_string()),
+                AiCommand::WebFetch { url, .. } => Some(format!("web_fetch {url}")),
+                AiCommand::Mkdir { path } => Some(format!("mkdir {path}")),
+                _ => None,
+            })
+            .collect();
+        if !planned.is_empty() {
+            let phase = {
+                let has_write = commands.iter().any(|c| {
+                    matches!(
+                        c,
+                        AiCommand::File { .. }
+                            | AiCommand::Edit { .. }
+                            | AiCommand::MultiEdit { .. }
+                            | AiCommand::Patch { .. }
+                            | AiCommand::DeleteFile { .. }
+                            | AiCommand::Mkdir { .. }
+                    )
+                });
+                let has_cmd = commands.iter().any(|c| matches!(c, AiCommand::Cmd { .. }));
+                let has_read = commands.iter().any(|c| {
+                    matches!(
+                        c,
+                        AiCommand::ReadFile { .. }
+                            | AiCommand::ListDir { .. }
+                            | AiCommand::Grep { .. }
+                            | AiCommand::Glob { .. }
+                    )
+                });
+                if has_write {
+                    "📝 修正"
+                } else if has_cmd {
+                    "⚙  実行"
+                } else if has_read {
+                    "🔍 調査"
+                } else {
+                    "   処理"
+                }
+            };
+            println!("  {DIM}─── {phase} ──────────────────────────────────{RESET}");
+            for p in &planned {
+                println!("  {DIM}→{RESET} {p}");
+            }
+        }
+
         // ── 2. ツールを実行 ───────────────────────────────────────────────
-        let is_done     = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }))
-            && !commands.iter().any(|c| !matches!(c, AiCommand::Bot { .. } | AiCommand::Txt { .. }));
+        let is_done = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }))
+            && !commands
+                .iter()
+                .any(|c| !matches!(c, AiCommand::Bot { .. } | AiCommand::Txt { .. }));
         let bot_message = commands.iter().find_map(|c| {
             if let AiCommand::Bot { message, content } = c {
-                message.as_deref().or(content.as_deref()).map(|s| s.to_string())
+                message
+                    .as_deref()
+                    .or(content.as_deref())
+                    .map(|s| s.to_string())
             } else {
                 None
             }
         });
-        let only_txt    = !is_done && tool_results.is_empty()
+        let only_txt = !is_done
+            && tool_results.is_empty()
             && commands.iter().all(|c| matches!(c, AiCommand::Txt { .. }));
 
         // ツール種別による自動確認スキップ（llm-prompts.md §4）
         // 読み取り系のみ → 確認なし / 破壊的操作あり + !auto_confirm → インライン確認
         let commands = filter_by_permission(commands, auto_confirm).await;
 
-        let (exec_results, messages) = execute(&effective_root, &commands, &mut read_files, checkpoints).await;
+        let (exec_results, messages) =
+            execute(&effective_root, &commands, &mut read_files, checkpoints).await;
 
         // enter_worktree / exit_worktree で root が変わった場合に追従
         effective_root = worktree::load_state(root)
@@ -568,8 +751,11 @@ pub async fn run_agent(
                 has_successful_file_update = true;
             }
             if is_error_output(&r.output) {
-                done_log.push(format!("✗ {} → {}", r.label,
-                    r.output.splitn(2, ": ").nth(1).unwrap_or("").trim()));
+                done_log.push(format!(
+                    "✗ {} → {}",
+                    r.label,
+                    r.output.splitn(2, ": ").nth(1).unwrap_or("").trim()
+                ));
             } else {
                 done_log.push(format!("✓ {}", r.label));
             }
@@ -577,10 +763,20 @@ pub async fn run_agent(
         tool_results.extend(exec_results);
 
         // read_file 連打カウント更新
-        let all_read_file = commands.iter().all(|c| matches!(c, AiCommand::ReadFile { .. }));
-        let has_grep_glob = commands.iter().any(|c| matches!(c, AiCommand::Grep { .. } | AiCommand::Glob { .. } | AiCommand::Bot { .. }));
+        let all_read_file = commands
+            .iter()
+            .all(|c| matches!(c, AiCommand::ReadFile { .. }));
+        let has_grep_glob = commands.iter().any(|c| {
+            matches!(
+                c,
+                AiCommand::Grep { .. } | AiCommand::Glob { .. } | AiCommand::Bot { .. }
+            )
+        });
         if all_read_file && !has_grep_glob {
-            consecutive_read_file += commands.iter().filter(|c| matches!(c, AiCommand::ReadFile { .. })).count() as u32;
+            consecutive_read_file += commands
+                .iter()
+                .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
+                .count() as u32;
         } else {
             consecutive_read_file = 0;
         }
@@ -597,7 +793,12 @@ pub async fn run_agent(
             display_result(r, verbose);
         }
         if verbose {
-            if commands.iter().filter(|c| matches!(c, AiCommand::ReadFile { .. })).count() > 1 {
+            if commands
+                .iter()
+                .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
+                .count()
+                > 1
+            {
                 println!("  {DIM}複数ファイル読み込みのため複数ターンを使用します{RESET}");
             }
         }
@@ -605,9 +806,18 @@ pub async fn run_agent(
         // ── 4. 次のターンの状態を決定（明示的な Continuation パターン）────
         let ctx = build_context_header(user_task, &read_files, root, &done_log);
         let outcome = determine_outcome(
-            user_task, bot_message.as_deref(), is_done, only_txt, &tool_results,
-            turn, &ctx, consecutive_txt, &read_files, root,
-            has_successful_file_update, consecutive_read_file,
+            user_task,
+            bot_message.as_deref(),
+            is_done,
+            only_txt,
+            &tool_results,
+            turn,
+            &ctx,
+            consecutive_txt,
+            &read_files,
+            root,
+            has_successful_file_update,
+            consecutive_read_file,
         );
 
         dbg.turn_end();
@@ -650,7 +860,9 @@ pub async fn run_agent(
 fn display_result(r: &ToolResult, verbose: bool) {
     if r.label == "ParseError" {
         if verbose {
-            println!("  {RED_BOLD}[ParseError]{RESET} JSON パース失敗 {DIM}(詳細は .copipe_logs/browser_log){RESET}");
+            println!(
+                "  {RED_BOLD}[ParseError]{RESET} JSON パース失敗 {DIM}(詳細は .copipe_logs/browser_log){RESET}"
+            );
         }
     } else if is_error_output(&r.output) {
         // 種別ごとに色分け（llm-prompts.md §3）
@@ -663,16 +875,29 @@ fn display_result(r: &ToolResult, verbose: bool) {
         }
     } else if verbose {
         let preview: String = r.output.lines().take(15).collect::<Vec<_>>().join("\n");
-        let suffix = if r.output.lines().count() > 15 { "\n  …" } else { "" };
-        println!("  {DIM}[{}]{RESET}\n{}{}", r.label, preview, suffix);
+        let suffix = if r.output.lines().count() > 15 {
+            "\n  …"
+        } else {
+            ""
+        };
+        println!("  {GREEN}✓{RESET} {}{}", r.label, "");
+        println!("{}{}", preview, suffix);
     } else {
-        println!("  {DIM}[{}] {}{RESET}", r.label, summarize_for_display(&r.label, &r.output));
+        println!(
+            "  {GREEN}✓{RESET} {} {DIM}{}{RESET}",
+            r.label,
+            summarize_for_display(&r.label, &r.output)
+        );
     }
 }
 
 fn print_summary(done_log: &[String], reached_max: bool) {
     if !done_log.is_empty() {
-        let header = if reached_max { "── 実行サマリー（中断）" } else { "── 実行サマリー" };
+        let header = if reached_max {
+            "── 実行サマリー（中断）"
+        } else {
+            "── 実行サマリー"
+        };
         println!("\n{BOLD}{header}{RESET}");
         for item in done_log {
             if item.starts_with('✓') {
@@ -681,8 +906,18 @@ fn print_summary(done_log: &[String], reached_max: bool) {
                 let display = if let Some(arrow) = item.find(" → ") {
                     let sep_len = " → ".len(); // " "(1) + "→"(3bytes) + " "(1) = 5
                     let reason = &item[arrow + sep_len..];
-                    let first_line: String = reason.lines().next().unwrap_or("").chars().take(80).collect();
-                    let suffix = if first_line.chars().count() < reason.chars().count() { "…" } else { "" };
+                    let first_line: String = reason
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect();
+                    let suffix = if first_line.chars().count() < reason.chars().count() {
+                        "…"
+                    } else {
+                        ""
+                    };
                     format!("{}{suffix}", &item[..arrow + sep_len + first_line.len()])
                 } else {
                     item.clone()
@@ -694,7 +929,31 @@ fn print_summary(done_log: &[String], reached_max: bool) {
 
     if reached_max {
         println!("\n{YELLOW}最大ターン数 ({MAX_TURNS}) に達しました。{RESET}");
-        println!("{DIM}→ 同じタスクを再入力すると続きから再開できます（セッションを保存済み）。{RESET}");
-        println!("{DIM}  タスクが大きい場合は「〇〇だけ修正して」のように絞り込むと効率的です。{RESET}");
+        println!(
+            "{DIM}→ 同じタスクを再入力すると続きから再開できます（セッションを保存済み）。{RESET}"
+        );
+        println!(
+            "{DIM}  タスクが大きい場合は「〇〇だけ修正して」のように絞り込むと効率的です。{RESET}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_prompt_adds_review_efficiency_hints() {
+        let prompt = build_initial_prompt("src/agent/debug_log.rs をレビューして");
+
+        assert!(prompt.contains("空 grep を挟まず直接 read_file"));
+        assert!(prompt.contains("具体的な指摘・根拠・改善案"));
+    }
+
+    #[test]
+    fn initial_prompt_leaves_non_review_tasks_plain() {
+        let task = "cargo check して";
+
+        assert_eq!(build_initial_prompt(task), task);
     }
 }

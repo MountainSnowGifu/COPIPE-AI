@@ -3,8 +3,7 @@
 /// run_agent() の状態（read_files / done_log）をターンごとにディスクに保存する。
 /// 20ターン上限・Ctrl+C・クラッシュ後も「続きから」再開できる。
 ///
-/// 保存先: ~/.copipe_sessions/<path_hash16>/session.json
-
+/// 保存先: ホームディレクトリ配下の .copipe_sessions/<path_hash16>/session.json
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -15,11 +14,11 @@ const SESSION_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub version: u32,
-    pub project_dir: String,   // root の絶対パス
+    pub project_dir: String, // root の絶対パス
     pub user_task: String,
     pub turn_count: u32,
-    pub saved_at: String,      // JST タイムスタンプ
-    pub done_log: Vec<String>, // "✓ label" / "✗ label" の履歴
+    pub saved_at: String,        // JST タイムスタンプ
+    pub done_log: Vec<String>,   // "✓ label" / "✗ label" の履歴
     pub read_files: Vec<String>, // root からの相対パス
 }
 
@@ -94,11 +93,11 @@ impl SessionStore {
 
 // ─── ユーティリティ ───────────────────────────────────────────────────────────
 
-/// `~/.copipe_sessions/` ディレクトリのパスを返す
+/// セッション保存ディレクトリのパスを返す
 fn home_sessions_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".copipe_sessions"))
-        .unwrap_or_else(|_| std::env::temp_dir().join("copipe_sessions"))
+    crate::paths::home_dir()
+        .map(|h| h.join(".copipe_sessions"))
+        .unwrap_or_else(|| std::env::temp_dir().join("copipe_sessions"))
 }
 
 fn session_dir_for_hash(hash: &str) -> PathBuf {
@@ -153,7 +152,10 @@ mod tests {
         let mut read_files = HashSet::new();
         read_files.insert(root.join("src/main.rs"));
         read_files.insert(root.join("src/lib.rs"));
-        let done_log = vec!["✓ ListDir(src)".to_string(), "✓ ReadFile(src/main.rs)".to_string()];
+        let done_log = vec![
+            "✓ ListDir(src)".to_string(),
+            "✓ ReadFile(src/main.rs)".to_string(),
+        ];
 
         store.save(&root, "コードレビューして", 5, &done_log, &read_files);
         assert!(store.exists());

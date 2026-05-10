@@ -5,43 +5,53 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     // Rust toolchain（サブコマンドは ALLOWED_CARGO_SUBCMDS で制限）
     "cargo", "rustc", "rustfmt",
     // バージョン管理（読み取り系のみ。書き込み系は ALLOWED_GIT_SUBCMDS で制限）
-    "git",
-    // ファイル閲覧・検索（書き込みなし）
+    "git", // ファイル閲覧・検索（書き込みなし）
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
     // テキスト処理（awk は system() でシェル実行可、sed は w コマンドで書き込み可のため除外）
     "sort", "uniq", "tr", "cut", "jq",
     // 情報表示（引数ゼロ限定。環境変数表示のみ）
     "echo", "printf", "date",
+    // Windows: PATH 検索（where.exe）
+    "where",
 ];
 
 /// git で許可する読み取り系サブコマンド（それ以外はすべて拒否）
 const ALLOWED_GIT_SUBCMDS: &[&str] = &[
-    "log", "status", "diff", "show", "blame", "ls-files",
-    "describe", "branch", "tag", "grep", "rev-parse", "cat-file",
-    "shortlog", "reflog",
+    "log",
+    "status",
+    "diff",
+    "show",
+    "blame",
+    "ls-files",
+    "describe",
+    "branch",
+    "tag",
+    "grep",
+    "rev-parse",
+    "cat-file",
+    "shortlog",
+    "reflog",
 ];
 
 /// cargo で許可するサブコマンド
 /// 注意: build / check / clippy / doc も build.rs・proc macro・コンパイラプラグイン経由で
 /// 任意コードを実行し得る。untrusted リポジトリへの使用は本質的にリスクを伴う。
 /// run / test / bench / fix は加えてバイナリ・テストコードも実行するため除外。
-const ALLOWED_CARGO_SUBCMDS: &[&str] = &[
-    "build", "check", "fmt", "clippy", "doc", "clean",
-];
+const ALLOWED_CARGO_SUBCMDS: &[&str] = &["build", "check", "fmt", "clippy", "doc", "clean"];
 
 /// cargo で明示的に拒否するサブコマンド（任意コード実行の恐れ）
 const BLOCKED_CARGO_SUBCMDS: &[&str] = &["run", "test", "bench", "fix", "install", "publish"];
 
 /// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
-const BLOCKED_ARGS: &[(&str, &[&str])] = &[
-    ("find", &["-delete", "-exec", "-execdir"]),
-];
+const BLOCKED_ARGS: &[(&str, &[&str])] = &[("find", &["-delete", "-exec", "-execdir"])];
 
 pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     let exe = cmd.first().ok_or_else(|| "cmd が空です".to_string())?;
 
-    if exe.starts_with('/') {
-        return Err(format!("Permission denied: 絶対パス '{exe}' での実行は禁止です"));
+    if crate::paths::is_absolute_path_arg(exe) {
+        return Err(format!(
+            "Permission denied: 絶対パス '{exe}' での実行は禁止です"
+        ));
     }
     // 相対パス付き実行（./cargo, tools/git など）は basename allowlist を迂回できるため拒否
     if exe.contains('/') || exe.contains('\\') {
@@ -62,11 +72,15 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
 
     // 引数チェック: 絶対パス・`..` を拒否
     for arg in &cmd[1..] {
-        if arg.starts_with('/') {
-            return Err(format!("Permission denied: 引数 '{arg}' に絶対パスが含まれています"));
+        if crate::paths::is_absolute_path_arg(arg) {
+            return Err(format!(
+                "Permission denied: 引数 '{arg}' に絶対パスが含まれています"
+            ));
         }
-        if arg.contains("..") {
-            return Err(format!("Permission denied: 引数 '{arg}' に '..' が含まれています"));
+        if crate::paths::has_parent_component_arg(arg) {
+            return Err(format!(
+                "Permission denied: 引数 '{arg}' に '..' が含まれています"
+            ));
         }
     }
 

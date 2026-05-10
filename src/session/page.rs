@@ -282,7 +282,9 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
             .map_err(|e| anyhow::anyhow!(e))?,
     )
     .await?;
-    page.execute(SetLocaleOverrideParams::builder().locale("ja_JP").build()).await.ok();
+    page.execute(SetLocaleOverrideParams::builder().locale("ja_JP").build())
+        .await
+        .ok();
     page.execute(
         SetTimezoneOverrideParams::builder()
             .timezone_id("Asia/Tokyo")
@@ -299,7 +301,9 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
     )
     .await
     .ok();
-    page.execute(SetAutomationOverrideParams::new(false)).await.ok();
+    page.execute(SetAutomationOverrideParams::new(false))
+        .await
+        .ok();
     page.execute(
         SetDeviceMetricsOverrideParams::builder()
             .width(1280u32)
@@ -310,7 +314,8 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
             .map_err(|e| anyhow::anyhow!(e))?,
     )
     .await?;
-    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(ANTI_BOT_JS)).await?;
+    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(ANTI_BOT_JS))
+        .await?;
     use std::io::Write as _;
     page.goto("https://copilot.microsoft.com").await?;
     for s in 1..=5u64 {
@@ -337,13 +342,19 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
                     let mut buf = String::new();
                     std::io::stdin().read_line(&mut buf).ok();
                 }),
-            ).await;
+            )
+            .await;
             if wait_result.is_err() {
                 anyhow::bail!("ログイン待機がタイムアウトしました（120秒）。再実行してください");
             }
             // 再待機（最大60秒）
-            wait_for_element(&page, "#userInput", 60).await
-                .map_err(|_| anyhow::anyhow!("ログイン後も入力欄が見つかりませんでした。ブラウザを確認してください"))?;
+            wait_for_element(&page, "#userInput", 60)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "ログイン後も入力欄が見つかりませんでした。ブラウザを確認してください"
+                    )
+                })?;
         } else {
             anyhow::bail!("Copilot の入力欄が見つかりません。ブラウザを確認してください");
         }

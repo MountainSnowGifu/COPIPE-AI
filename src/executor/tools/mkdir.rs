@@ -1,5 +1,5 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 
 pub fn handle(ctx: &ToolContext<'_>, path: &str) -> ToolResult {
     let output = match ctx.resolve(path) {

@@ -3,7 +3,6 @@
 /// 書き込み系ツール（write_file / edit / multi_edit / patch）が
 /// ファイルを変更する前に元の内容をここに保存する。
 /// `:undo` で直前の状態に戻せる。git 不要・軽量・常に使える。
-
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,10 +13,10 @@ const MAX_CHECKPOINTS: usize = 50;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: String,
-    pub file_path: PathBuf,      // absolute
-    pub relative_path: String,   // root からの相対パス（表示用）
-    pub content: String,         // 変更前のファイル内容
-    pub operation: String,       // "write" | "edit" | "patch" など
+    pub file_path: PathBuf,    // absolute
+    pub relative_path: String, // root からの相対パス（表示用）
+    pub content: String,       // 変更前のファイル内容
+    pub operation: String,     // "write" | "edit" | "patch" など
     pub timestamp_ms: u64,
 }
 
@@ -51,7 +50,11 @@ impl CheckpointManager {
     /// 保存に成功したらチェックポイント ID を返す
     pub fn save(&mut self, file_path: &Path, content: &str, operation: &str) -> Option<String> {
         // symlink チェック（セキュリティ）
-        if file_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if file_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             return None;
         }
 

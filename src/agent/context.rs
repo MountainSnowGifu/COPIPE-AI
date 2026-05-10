@@ -53,7 +53,10 @@ pub(super) fn build_context_header(
 
     // read_file 連打を検知してグリップ — 直近 done_log の大半が ReadFile なら警告
     {
-        let recent_reads = done_log.iter().rev().take(5)
+        let recent_reads = done_log
+            .iter()
+            .rev()
+            .take(5)
             .filter(|s| s.contains("ReadFile("))
             .count();
         if recent_reads >= 4 {
@@ -65,9 +68,12 @@ pub(super) fn build_context_header(
     }
 
     if dynamic_lines.is_empty() {
-        static_ctx
+        format!("{static_ctx}\n\n→ 次のアクションを ```json コードブロックで出力してください")
     } else {
-        format!("{static_ctx}\n\n## Dynamic context\n{}", dynamic_lines.join("\n"))
+        format!(
+            "{static_ctx}\n\n## Dynamic context\n{}\n\n→ 次のアクションを ```json コードブロックで出力してください",
+            dynamic_lines.join("\n")
+        )
     }
 }
 
@@ -89,18 +95,27 @@ fn compact_done_log(done_log: &[String]) -> String {
         let cutoff = n - RECENT_MICRO;
         let (older, recent) = done_log.split_at(cutoff);
         let header = compacted_header(older);
-        let older_list = older.iter()
+        let older_list = older
+            .iter()
             .map(|s| short_label(s))
             .collect::<Vec<_>>()
             .join(" | ");
-        let recent_str = recent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" → ");
+        let recent_str = recent
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
         format!("[完了済みアクション]\n{header}\n{older_list}\n[Recent] {recent_str}")
     } else {
         // フル圧縮: 古い部分はヘッダーのみ + 直近3件
         let cutoff = n - RECENT_FULL;
         let (older, recent) = done_log.split_at(cutoff);
         let header = compacted_header(older);
-        let recent_str = recent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" → ");
+        let recent_str = recent
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
         format!("[完了済みアクション]\n{header}\n[Recent] {recent_str}")
     }
 }
@@ -108,7 +123,7 @@ fn compact_done_log(done_log: &[String]) -> String {
 /// Claude Code の "[Context compacted — summary of N earlier messages]" 形式のヘッダー
 fn compacted_header(slice: &[String]) -> String {
     let success = slice.iter().filter(|s| s.starts_with('✓')).count();
-    let fail    = slice.iter().filter(|s| s.starts_with('✗')).count();
+    let fail = slice.iter().filter(|s| s.starts_with('✗')).count();
     let stats = if fail == 0 {
         format!("✓{success}")
     } else {
@@ -116,7 +131,8 @@ fn compacted_header(slice: &[String]) -> String {
     };
     format!(
         "[Context compacted — summary of {} earlier actions ({})]",
-        slice.len(), stats
+        slice.len(),
+        stats
     )
 }
 
@@ -185,7 +201,8 @@ pub(super) fn summarize_for_display(label: &str, output: &str) -> String {
     }
     let first = output.lines().next().unwrap_or("").trim();
     let chars: String = first.chars().take(120).collect();
-    if first.chars().count() > 120 {
+    let first_count = first.chars().count();
+    if first_count > 120 {
         format!("{chars}…")
     } else {
         chars

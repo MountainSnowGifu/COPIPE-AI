@@ -1,5 +1,5 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 use std::path::Path;
 
 /// ファイルまたはディレクトリを再帰的に検索して pattern に一致する行を返す
@@ -11,11 +11,19 @@ pub fn handle(
     file_glob: &Option<String>,
 ) -> ToolResult {
     if pattern.is_empty() {
-        return ToolResult::new(format!("Grep({pattern})"), "ERROR: pattern が空です".to_string());
+        return ToolResult::new(
+            format!("Grep({pattern})"),
+            "ERROR: pattern が空です".to_string(),
+        );
     }
 
     let abs = match ctx.resolve(path) {
-        Err(e) => return ToolResult::new(format!("Grep({pattern})"), crate::executor::errors::tool_error(&e)),
+        Err(e) => {
+            return ToolResult::new(
+                format!("Grep({pattern})"),
+                crate::executor::errors::tool_error(&e),
+            );
+        }
         Ok(p) => p,
     };
 
@@ -26,11 +34,25 @@ pub fn handle(
     let glob_ext = file_glob.as_deref();
 
     if abs.is_file() {
-        search_file(&abs, pattern, context_lines, &mut matches, &mut total_matches, MAX_MATCHES);
+        search_file(
+            &abs,
+            pattern,
+            context_lines,
+            &mut matches,
+            &mut total_matches,
+            MAX_MATCHES,
+        );
     } else if abs.is_dir() {
         collect_files(&abs, glob_ext, &mut |file| {
             if total_matches < MAX_MATCHES {
-                search_file(file, pattern, context_lines, &mut matches, &mut total_matches, MAX_MATCHES);
+                search_file(
+                    file,
+                    pattern,
+                    context_lines,
+                    &mut matches,
+                    &mut total_matches,
+                    MAX_MATCHES,
+                );
             }
         });
     }
@@ -126,7 +148,12 @@ fn collect_files<F: FnMut(&Path)>(dir: &Path, glob_ext: Option<&str>, callback: 
         let path = entry.path();
         if path.is_dir() {
             // .git などの隠しディレクトリはスキップ
-            if path.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with('.')).unwrap_or(false) {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
             collect_files(&path, glob_ext, callback);

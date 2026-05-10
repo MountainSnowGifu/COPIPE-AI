@@ -1,5 +1,5 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 
 /// ファイル内の文字列を完全一致で1箇所だけ置換する
 ///
@@ -18,7 +18,10 @@ pub fn handle(
     let label = format!("Edit({path})");
 
     if old_string.is_empty() {
-        return ToolResult::new(label, "ERROR: old_string が空です。置換したい文字列を指定してください。");
+        return ToolResult::new(
+            label,
+            "ERROR: old_string が空です。置換したい文字列を指定してください。",
+        );
     }
 
     let abs = match ctx.resolve(path) {
@@ -27,16 +30,20 @@ pub fn handle(
     };
 
     // symlink チェック
-    if abs.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return ToolResult::new(label, crate::executor::errors::perm_denied(format!("'{path}' はシンボリックリンクです")));
+    if abs
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return ToolResult::new(
+            label,
+            crate::executor::errors::perm_denied(format!("'{path}' はシンボリックリンクです")),
+        );
     }
 
     // 事前 read_file チェック
     if !ctx.read_files.contains(&abs) {
-        return ToolResult::new(
-            label,
-            crate::executor::errors::unread_file(path),
-        );
+        return ToolResult::new(label, crate::executor::errors::unread_file(path));
     }
 
     if !abs.exists() {

@@ -13,7 +13,10 @@ pub async fn handle(url: &str, _selector: &Option<String>) -> ToolResult {
 
     // URL の基本検証
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return ToolResult::new(label, "ERROR: URL は http:// または https:// で始まる必要があります。");
+        return ToolResult::new(
+            label,
+            "ERROR: URL は http:// または https:// で始まる必要があります。",
+        );
     }
 
     let client = match reqwest::ClientBuilder::new()
@@ -84,19 +87,31 @@ fn strip_html(html: &str) -> String {
     while let Some((i, ch)) = chars.next() {
         // <script> / <style> ブロックをスキップ
         if !in_tag {
-            if lower[i..].starts_with("<script") { in_script = true; }
-            if lower[i..].starts_with("</script>") { in_script = false; }
-            if lower[i..].starts_with("<style") { in_style = true; }
-            if lower[i..].starts_with("</style>") { in_style = false; }
+            if lower[i..].starts_with("<script") {
+                in_script = true;
+            }
+            if lower[i..].starts_with("</script>") {
+                in_script = false;
+            }
+            if lower[i..].starts_with("<style") {
+                in_style = true;
+            }
+            if lower[i..].starts_with("</style>") {
+                in_style = false;
+            }
         }
 
         if in_script || in_style {
-            if ch == '>' { in_script = in_script && !lower[i..].starts_with("</script>"); }
+            if ch == '>' {
+                in_script = in_script && !lower[i..].starts_with("</script>");
+            }
             continue;
         }
 
         match ch {
-            '<' => { in_tag = true; }
+            '<' => {
+                in_tag = true;
+            }
             '>' => {
                 in_tag = false;
                 // ブロック要素の後には改行を挿入
@@ -105,10 +120,16 @@ fn strip_html(html: &str) -> String {
             }
             _ if in_tag => {}
             '\n' | '\r' | '\t' => {
-                if !prev_ws { out.push(' '); prev_ws = true; }
+                if !prev_ws {
+                    out.push(' ');
+                    prev_ws = true;
+                }
             }
             ' ' => {
-                if !prev_ws { out.push(' '); prev_ws = true; }
+                if !prev_ws {
+                    out.push(' ');
+                    prev_ws = true;
+                }
             }
             _ => {
                 // HTML エンティティの簡易デコード

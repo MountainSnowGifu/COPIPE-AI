@@ -1,11 +1,15 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 
 pub fn handle(ctx: &mut ToolContext<'_>, path: &str, content: &str) -> ToolResult {
     let output = match ctx.resolve(path) {
         Err(e) => crate::executor::errors::tool_error(&e),
         Ok(abs) => {
-            if abs.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if abs
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 crate::executor::errors::perm_denied(format!("'{path}' はシンボリックリンクです"))
             } else if abs.exists() && !ctx.read_files.contains(&abs) {
                 crate::executor::errors::unread_file(path)
@@ -20,7 +24,10 @@ pub fn handle(ctx: &mut ToolContext<'_>, path: &str, content: &str) -> ToolResul
                     }
                 }
                 match std::fs::write(&abs, content) {
-                    Ok(_) => { ctx.read_files.insert(abs); "OK".to_string() }
+                    Ok(_) => {
+                        ctx.read_files.insert(abs);
+                        "OK".to_string()
+                    }
                     Err(e) => crate::executor::errors::tool_error(&e),
                 }
             }

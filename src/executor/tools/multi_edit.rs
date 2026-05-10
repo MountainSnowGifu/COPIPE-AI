@@ -1,6 +1,6 @@
 use crate::command::EditPair;
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 
 /// 複数の文字列置換を1ファイルにアトミックに適用する
 ///
@@ -25,15 +25,19 @@ pub fn handle(ctx: &mut ToolContext<'_>, path: &str, edits: &[EditPair]) -> Tool
         Ok(p) => p,
     };
 
-    if abs.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return ToolResult::new(label, crate::executor::errors::perm_denied(format!("'{path}' はシンボリックリンクです")));
+    if abs
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return ToolResult::new(
+            label,
+            crate::executor::errors::perm_denied(format!("'{path}' はシンボリックリンクです")),
+        );
     }
 
     if !ctx.read_files.contains(&abs) {
-        return ToolResult::new(
-            label,
-            crate::executor::errors::unread_file(path),
-        );
+        return ToolResult::new(label, crate::executor::errors::unread_file(path));
     }
 
     if !abs.exists() {
@@ -123,7 +127,9 @@ mod tests {
         let mut s = src.to_string();
         for (old, new) in edits {
             let n = s.matches(old).count();
-            if n != 1 { return None; }
+            if n != 1 {
+                return None;
+            }
             s = s.replacen(old, new, 1);
         }
         Some(s)
@@ -132,7 +138,10 @@ mod tests {
     #[test]
     fn test_sequential_apply() {
         let src = "let x = 1;\nlet y = 2;\n";
-        let result = apply(src, &[("let x = 1;", "let x = 10;"), ("let y = 2;", "let y = 20;")]);
+        let result = apply(
+            src,
+            &[("let x = 1;", "let x = 10;"), ("let y = 2;", "let y = 20;")],
+        );
         assert_eq!(result, Some("let x = 10;\nlet y = 20;\n".to_string()));
     }
 
@@ -140,7 +149,13 @@ mod tests {
     fn test_chained_edit_dependency() {
         // 2番目の置換が1番目の結果に依存するケース
         let src = "fn old() {}";
-        let result = apply(src, &[("fn old()", "fn new()"), ("fn new() {}", "fn new() { todo!() }")]);
+        let result = apply(
+            src,
+            &[
+                ("fn old()", "fn new()"),
+                ("fn new() {}", "fn new() { todo!() }"),
+            ],
+        );
         assert_eq!(result, Some("fn new() { todo!() }".to_string()));
     }
 

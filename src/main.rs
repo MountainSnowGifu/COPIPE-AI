@@ -2,26 +2,29 @@ mod agent;
 mod color;
 mod command;
 mod executor;
+mod paths;
 mod session;
 
-use agent::{build_system_prompt, run_agent, SessionStore};
 use agent::debug_log::DebugLogger;
+use agent::{SessionStore, build_system_prompt, run_agent};
+use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW, use_unicode};
 use executor::CheckpointManager;
-use executor::tools;
-use color::{use_unicode, BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW};
 use executor::LOG_DIR;
+use executor::tools;
 use session::CopilotSession;
 
 // #6: セクション分けされたヘルプ + #9: Ctrl+C 明記
 fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
-    let v_state = if verbose      { "ON " } else { "OFF" };
+    let v_state = if verbose { "ON " } else { "OFF" };
     let y_state = if auto_confirm { "ON " } else { "OFF" };
-    let d_state = if debug        { "ON " } else { "OFF" };
+    let d_state = if debug { "ON " } else { "OFF" };
 
     println!("{BOLD}── コマンド ─────────────────────────────────{RESET}");
     println!("  {BOLD}:h{RESET}       このヘルプを表示");
     println!("  {BOLD}:v{RESET}       verboseモード切替      (現在: {BOLD}{v_state}{RESET})");
-    println!("  {BOLD}:d{RESET}       デバッグログ切替       (現在: {BOLD}{d_state}{RESET})  → .copipe_logs/debug_log");
+    println!(
+        "  {BOLD}:d{RESET}       デバッグログ切替       (現在: {BOLD}{d_state}{RESET})  → .copipe_logs/debug_log"
+    );
     println!("  {BOLD}:y{RESET}       自動確認モード切替     (現在: {BOLD}{y_state}{RESET})");
     println!("  {BOLD}:undo{RESET}    直前のファイル変更を元に戻す");
     println!("  {BOLD}:undo list{RESET} チェックポイント一覧を表示");
@@ -68,12 +71,16 @@ async fn main() -> anyhow::Result<()> {
     let root = match root_dir {
         Some(ref p) => std::path::PathBuf::from(p),
         None => std::env::current_dir()?,
-    }
-    .canonicalize()?;
+    };
+    let root = canonicalize_clean(&root)?;
 
     // 起動時にログを初期化（シンボリックリンク経由のルート外書き込みを防ぐ）
     let log_dir = root.join(LOG_DIR);
-    if log_dir.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+    if log_dir
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
         anyhow::bail!(
             "{} はシンボリックリンクです。untrusted リポジトリによるログ外部書き込みを防ぐため起動を中止します。",
             log_dir.display()
@@ -84,7 +91,11 @@ async fn main() -> anyhow::Result<()> {
     let is_first_run = !log_dir.join("ai_log").exists();
     for name in &["ai_log", "cmd_log", "browser_log"] {
         let log_path = log_dir.join(name);
-        if log_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if log_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             anyhow::bail!(
                 "{} はシンボリックリンクです。外部ファイルへのログ書き込みを防ぐため起動を中止します。",
                 log_path.display()
@@ -113,23 +124,44 @@ async fn main() -> anyhow::Result<()> {
     };
     let line = h.repeat(50);
     println!("{CYAN_BOLD}{tl}{line}{tr}{RESET}");
-    println!("{CYAN_BOLD}{v}{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}{v}{RESET}");
+    println!(
+        "{CYAN_BOLD}{v}{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}{v}{RESET}"
+    );
     println!("{CYAN_BOLD}{bl}{line}{br}{RESET}");
     println!("プロジェクト: {BOLD}{}{RESET}", root.display());
     {
-        let v_state = if verbose      { format!("{BOLD}ON{RESET}")  } else { format!("{DIM}OFF{RESET}") };
-        let y_state = if auto_confirm { format!("{BOLD}ON{RESET}")  } else { format!("{DIM}OFF{RESET}") };
-        let d_state = if debug        { format!("{BOLD}ON{RESET}")  } else { format!("{DIM}OFF{RESET}") };
-        println!("モード: 詳細ログ={v_state}  自動確認={y_state}  デバッグ={d_state}  {DIM}(切替: :v / :y / :d){RESET}");
+        let v_state = if verbose {
+            format!("{BOLD}ON{RESET}")
+        } else {
+            format!("{DIM}OFF{RESET}")
+        };
+        let y_state = if auto_confirm {
+            format!("{BOLD}ON{RESET}")
+        } else {
+            format!("{DIM}OFF{RESET}")
+        };
+        let d_state = if debug {
+            format!("{BOLD}ON{RESET}")
+        } else {
+            format!("{DIM}OFF{RESET}")
+        };
+        println!(
+            "モード: 詳細ログ={v_state}  自動確認={y_state}  デバッグ={d_state}  {DIM}(切替: :v / :y / :d){RESET}"
+        );
         if debug {
-            println!("{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・状態を記録します{RESET}");
+            println!(
+                "{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・状態を記録します{RESET}"
+            );
         }
     }
     println!("{DIM}ヘルプは :h  Ctrl+C でキャンセル  終了は exit または Ctrl+D{RESET}");
 
     // #8: 初回起動時のみログディレクトリを案内
     if is_first_run {
-        println!("{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log){RESET}", log_dir.display());
+        println!(
+            "{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log){RESET}",
+            log_dir.display()
+        );
     }
 
     // 前回セッションが残っていれば案内（ただし即座に復元はしない — タスク入力時に判断）
@@ -139,14 +171,14 @@ async fn main() -> anyhow::Result<()> {
                 "{YELLOW}前回の未完了セッションがあります: 「{}」（{}ターン完了済み / {}）{RESET}",
                 prev.user_task, prev.turn_count, prev.saved_at
             );
-            println!("{DIM}同じタスクを入力すると続きから再開します。別のタスクを入力すると新規開始します。{RESET}");
+            println!(
+                "{DIM}同じタスクを入力すると続きから再開します。別のタスクを入力すると新規開始します。{RESET}"
+            );
         }
     }
 
     let mut rl = rustyline::DefaultEditor::new()?;
-    let history_path = std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".copipe_ai_history"));
+    let history_path = paths::home_dir().map(|h| h.join(".copipe_ai_history"));
     if let Some(ref p) = history_path {
         rl.load_history(p).ok();
     }
@@ -157,11 +189,20 @@ async fn main() -> anyhow::Result<()> {
         let in_worktree = executor::tools::worktree::load_state(&root).is_some();
         let base_prompt: &str = &{
             let mut tags: Vec<&str> = Vec::new();
-            if in_worktree   { tags.push("worktree"); }
-            if auto_confirm  { tags.push("自動確認"); }
-            if verbose       { tags.push("詳細"); }
-            if tags.is_empty() { "\n> ".to_string() }
-            else { format!("\n[{}]> ", tags.join(",")) }
+            if in_worktree {
+                tags.push("worktree");
+            }
+            if auto_confirm {
+                tags.push("自動確認");
+            }
+            if verbose {
+                tags.push("詳細");
+            }
+            if tags.is_empty() {
+                "\n> ".to_string()
+            } else {
+                format!("\n[{}]> ", tags.join(","))
+            }
         };
         let mut task = String::new();
         loop {
@@ -194,26 +235,42 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        let task = task.trim().to_string();
+        let task = clean_task_input(&task);
         if task.is_empty() {
             continue;
         }
         match task.as_str() {
             "exit" | "quit" => break,
-            ":h" => { print_help(verbose, auto_confirm, debug); continue 'repl; }
+            ":h" => {
+                print_help(verbose, auto_confirm, debug);
+                continue 'repl;
+            }
             ":v" => {
                 verbose = !verbose;
-                println!("詳細ログ: {BOLD}{}{RESET}", if verbose { "ON" } else { "OFF" });
+                println!(
+                    "詳細ログ: {BOLD}{}{RESET}",
+                    if verbose { "ON" } else { "OFF" }
+                );
                 continue 'repl;
             }
             ":y" => {
                 auto_confirm = !auto_confirm;
-                println!("自動確認: {BOLD}{}{RESET}", if auto_confirm { "ON" } else { "OFF" });
+                println!(
+                    "自動確認: {BOLD}{}{RESET}",
+                    if auto_confirm { "ON" } else { "OFF" }
+                );
                 continue 'repl;
             }
             ":d" | ":debug" => {
                 debug = !debug;
-                println!("デバッグ: {BOLD}{}{RESET}", if debug { "ON (.copipe_logs/debug_log へ記録)" } else { "OFF" });
+                println!(
+                    "デバッグ: {BOLD}{}{RESET}",
+                    if debug {
+                        "ON (.copipe_logs/debug_log へ記録)"
+                    } else {
+                        "OFF"
+                    }
+                );
                 continue 'repl;
             }
             ":undo list" => {
@@ -221,7 +278,9 @@ async fn main() -> anyhow::Result<()> {
                 if list.is_empty() {
                     println!("{DIM}チェックポイントはありません{RESET}");
                 } else {
-                    println!("{BOLD}── チェックポイント（新しい順、:undo / :undo 0 / :undo 1 ...）──{RESET}");
+                    println!(
+                        "{BOLD}── チェックポイント（新しい順、:undo / :undo 0 / :undo 1 ...）──{RESET}"
+                    );
                     for (i, (path, op)) in list.iter().enumerate() {
                         println!("  {DIM}[{i}]{RESET} ↩ {path} ({op})");
                     }
@@ -230,19 +289,20 @@ async fn main() -> anyhow::Result<()> {
             }
             cmd if cmd == ":undo" || cmd.starts_with(":undo ") => {
                 // :undo → 最新1件、:undo N → N番目を復元
-                let idx: Option<usize> = cmd.strip_prefix(":undo ").and_then(|s| s.trim().parse().ok());
+                let idx: Option<usize> = cmd
+                    .strip_prefix(":undo ")
+                    .and_then(|s| s.trim().parse().ok());
                 let result = if let Some(n) = idx {
                     checkpoints.undo_at(n)
                 } else {
                     checkpoints.undo()
                 };
                 match result {
-                    Ok(Some((path, op))) =>
-                        println!("{GREEN_BOLD}✓{RESET} 復元しました: {path} ({op})"),
-                    Ok(None) =>
-                        println!("{YELLOW}チェックポイントがありません{RESET}"),
-                    Err(e) =>
-                        println!("{RED_BOLD}復元失敗: {e}{RESET}"),
+                    Ok(Some((path, op))) => {
+                        println!("{GREEN_BOLD}✓{RESET} 復元しました: {path} ({op})")
+                    }
+                    Ok(None) => println!("{YELLOW}チェックポイントがありません{RESET}"),
+                    Err(e) => println!("{RED_BOLD}復元失敗: {e}{RESET}"),
                 }
                 continue 'repl;
             }
@@ -269,8 +329,10 @@ async fn main() -> anyhow::Result<()> {
                 match rl.readline("実行しますか? [Enter=実行 / n=中止] ") {
                     Ok(ans) => match ans.trim() {
                         "" | "y" | "Y" => break 'confirm Some(true),
-                        "n" | "N"      => break 'confirm Some(false),
-                        other => println!("{DIM}「{other}」は無効です。Enter で実行、n で中止{RESET}"),
+                        "n" | "N" => break 'confirm Some(false),
+                        other => {
+                            println!("{DIM}「{other}」は無効です。Enter で実行、n で中止{RESET}")
+                        }
                     },
                     Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
                         break 'confirm Some(false);
@@ -323,4 +385,39 @@ async fn main() -> anyhow::Result<()> {
     println!("{DIM}終了します{RESET}");
     drop(session);
     Ok(())
+}
+
+fn canonicalize_clean(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let canonical = path.canonicalize()?;
+    // Windows の canonicalize は \\?\ プレフィックス（拡張パス）を返す場合があるので除去
+    #[cfg(target_os = "windows")]
+    {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return Ok(std::path::PathBuf::from(stripped));
+        }
+    }
+    Ok(canonical)
+}
+
+fn clean_task_input(input: &str) -> String {
+    input
+        .trim()
+        .trim_start_matches("\u{1b}[200~")
+        .trim_end_matches("\u{1b}[201~")
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_task_input_removes_bracketed_paste_markers() {
+        assert_eq!(
+            clean_task_input("\u{1b}[200~debug_log.rs をレビューして\u{1b}[201~"),
+            "debug_log.rs をレビューして"
+        );
+    }
 }

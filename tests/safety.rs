@@ -19,6 +19,16 @@ fn absolute_exe_fails() {
 }
 
 #[test]
+fn windows_absolute_exe_fails() {
+    let cmd = vec![
+        r"C:\Windows\System32\cmd.exe".to_string(),
+        "/C".to_string(),
+        "dir".to_string(),
+    ];
+    assert!(check_cmd_safety(&cmd).is_err());
+}
+
+#[test]
 fn exe_with_path_separator_fails() {
     let cmd = vec!["./cargo".to_string(), "build".to_string()];
     assert!(check_cmd_safety(&cmd).is_err());
@@ -27,6 +37,18 @@ fn exe_with_path_separator_fails() {
 #[test]
 fn arg_with_parent_dir_fails() {
     let cmd = vec!["cargo".to_string(), "build".to_string(), "..".to_string()];
+    assert!(check_cmd_safety(&cmd).is_err());
+}
+
+#[test]
+fn windows_absolute_arg_fails() {
+    let cmd = vec!["cat".to_string(), r"C:\Users\akira\secret.txt".to_string()];
+    assert!(check_cmd_safety(&cmd).is_err());
+}
+
+#[test]
+fn windows_unc_arg_fails() {
+    let cmd = vec!["cat".to_string(), r"\\server\share\secret.txt".to_string()];
     assert!(check_cmd_safety(&cmd).is_err());
 }
 
@@ -44,6 +66,11 @@ fn git_disallowed_subcommand_fails() {
 
 #[test]
 fn blocked_arg_for_sed_fails() {
-    let cmd = vec!["sed".to_string(), "-i".to_string(), "s/a/b/".to_string(), "file.txt".to_string()];
+    let cmd = vec![
+        "sed".to_string(),
+        "-i".to_string(),
+        "s/a/b/".to_string(),
+        "file.txt".to_string(),
+    ];
     assert!(check_cmd_safety(&cmd).is_err());
 }

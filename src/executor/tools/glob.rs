@@ -1,5 +1,5 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 use std::path::{Path, PathBuf};
 
 const MAX_RESULTS: usize = 500;
@@ -8,7 +8,7 @@ const MAX_RESULTS: usize = 500;
 ///
 /// 対応パターン:
 ///   `**`  ゼロ以上の任意パスコンポーネント
-///   `*`   スラッシュを除く任意の文字列
+///   `*`   パス区切りを除く任意の文字列
 ///   `?`   スラッシュを除く任意の1文字
 ///
 /// 例:
@@ -28,7 +28,10 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
                     .strip_prefix(ctx.root)
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| path.display().to_string());
-                ToolResult::new(format!("Glob({pattern})"), format!("{display}\n\n[1 ファイル]"))
+                ToolResult::new(
+                    format!("Glob({pattern})"),
+                    format!("{display}\n\n[1 ファイル]"),
+                )
             }
             Ok(_) => ToolResult::new(
                 format!("Glob({pattern})"),
@@ -54,11 +57,11 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
     let pattern_tail = pattern
         .strip_prefix(&base_str)
         .unwrap_or(pattern)
-        .trim_start_matches('/');
+        .trim_start_matches(is_path_separator);
     let pattern_parts: Vec<&str> = if pattern_tail.is_empty() {
         Vec::new()
     } else {
-        pattern_tail.split('/').collect()
+        pattern_tail.split(is_path_separator).collect()
     };
 
     let mut results: Vec<PathBuf> = Vec::new();
@@ -77,7 +80,11 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
 
     let lines: Vec<String> = results[..shown]
         .iter()
-        .filter_map(|p| p.strip_prefix(ctx.root).ok().map(|r| r.display().to_string()))
+        .filter_map(|p| {
+            p.strip_prefix(ctx.root)
+                .ok()
+                .map(|r| r.display().to_string())
+        })
         .collect();
 
     let mut output = lines.join("\n");
@@ -99,7 +106,7 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
 /// `pattern_parts` の残りに一致するパスを収集する
 fn walk(
     current: &Path,
-    walked: &[&str],      // current までに消費したパターン部分
+    walked: &[&str],        // current までに消費したパターン部分
     pattern_parts: &[&str], // まだ消費していないパターン部分
     root: &Path,
     results: &mut Vec<PathBuf>,
@@ -163,7 +170,7 @@ fn walk(
 // ─── パターンマッチ ───────────────────────────────────────────────────────────
 
 /// `*` と `?` を含む単一コンポーネントの一致判定
-/// `*` はスラッシュ以外の任意の文字列、`?` は1文字
+/// `*` はパス区切り以外の任意の文字列、`?` は1文字
 fn wildcard_match(pattern: &str, s: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = s.chars().collect();
@@ -179,7 +186,7 @@ fn wildcard_dp(p: &[char], t: &[char], pi: usize, ti: usize) -> bool {
         if wildcard_dp(p, t, pi + 1, ti) {
             return true;
         }
-        if ti < t.len() && t[ti] != '/' {
+        if ti < t.len() && !is_path_separator(t[ti]) {
             return wildcard_dp(p, t, pi, ti + 1);
         }
         return false;
@@ -197,10 +204,15 @@ fn wildcard_dp(p: &[char], t: &[char], pi: usize, ti: usize) -> bool {
 
 /// パターンの最初のワイルドカード文字より前の部分を返す
 fn non_wildcard_prefix(pattern: &str) -> String {
-    let idx = pattern.find(|c| matches!(c, '*' | '?')).unwrap_or(pattern.len());
+    let idx = pattern
+        .find(|c| matches!(c, '*' | '?'))
+        .unwrap_or(pattern.len());
     let prefix = &pattern[..idx];
-    // 末尾の `/` を除去
-    prefix.trim_end_matches('/').to_string()
+    prefix.trim_end_matches(is_path_separator).to_string()
+}
+
+fn is_path_separator(c: char) -> bool {
+    c == '/' || c == '\\'
 }
 
 fn is_hidden(path: &Path) -> bool {
@@ -227,7 +239,8 @@ mod tests {
         assert!(wildcard_match("*.rs", "main.rs"));
         assert!(wildcard_match("*.rs", "mod.rs"));
         assert!(!wildcard_match("*.rs", "main.txt"));
-        assert!(!wildcard_match("*.rs", "a/b.rs")); // * は / を越えない
+        assert!(!wildcard_match("*.rs", "a/b.rs"));
+        assert!(!wildcard_match("*.rs", r"a\b.rs"));
     }
 
     #[test]
@@ -245,6 +258,7 @@ mod tests {
     #[test]
     fn test_non_wildcard_prefix() {
         assert_eq!(non_wildcard_prefix("src/**/*.rs"), "src");
+        assert_eq!(non_wildcard_prefix(r"src\**\*.rs"), "src");
         assert_eq!(non_wildcard_prefix("**/*.toml"), "");
         assert_eq!(non_wildcard_prefix("src/main.rs"), "src/main.rs");
     }
@@ -265,6 +279,28 @@ mod tests {
 
         assert!(result.output.contains("src/main.rs"));
         assert!(result.output.contains("src/agent/mod.rs"));
+        assert!(!result.output.contains("readme.md"));
+    }
+
+    #[test]
+    fn test_handle_windows_separator_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+        std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
+
+        let mut read_files = std::collections::HashSet::new();
+        let mut checkpoints = crate::executor::CheckpointManager::new(dir.path());
+        let ctx = crate::executor::ToolContext::new(dir.path(), &mut read_files, &mut checkpoints);
+
+        let result = handle(&ctx, r"src\**\*.rs");
+
+        assert!(result.output.contains("src/main.rs") || result.output.contains(r"src\main.rs"));
+        assert!(
+            result.output.contains("src/agent/mod.rs")
+                || result.output.contains(r"src\agent\mod.rs")
+        );
         assert!(!result.output.contains("readme.md"));
     }
 }

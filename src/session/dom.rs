@@ -82,10 +82,7 @@ pub(crate) async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> St
 }
 
 pub(crate) async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
-    let _ = tokio::time::timeout(
-        Duration::from_secs(3),
-        scroll_to_nth_ai_message(page, n),
-    ).await;
+    let _ = tokio::time::timeout(Duration::from_secs(3), scroll_to_nth_ai_message(page, n)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let raw = page
         .evaluate_expression(&format!(

@@ -1,6 +1,6 @@
 use crate::command::{TodoItem, TodoStatus};
 use crate::executor::context::ToolContext;
-use crate::executor::{safe_append_log, ToolResult, LOG_DIR};
+use crate::executor::{LOG_DIR, ToolResult};
 use std::path::Path;
 
 pub const TODO_FILE: &str = "todo.json";
@@ -8,7 +8,10 @@ pub const TODO_FILE: &str = "todo.json";
 /// タスクリストを更新し、ターミナルに表示して永続化する
 pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
     if todos.is_empty() {
-        return ToolResult::new("TodoWrite", "ERROR: todos が空です。少なくとも1件のタスクを指定してください。");
+        return ToolResult::new(
+            "TodoWrite",
+            "ERROR: todos が空です。少なくとも1件のタスクを指定してください。",
+        );
     }
 
     // ステータス検証
@@ -17,7 +20,10 @@ pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
             return ToolResult::new("TodoWrite", "ERROR: id が空のタスクがあります。");
         }
         if item.content.is_empty() {
-            return ToolResult::new("TodoWrite", format!("ERROR: タスク '{}' の content が空です。", item.id));
+            return ToolResult::new(
+                "TodoWrite",
+                format!("ERROR: タスク '{}' の content が空です。", item.id),
+            );
         }
     }
 
@@ -26,8 +32,15 @@ pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
     let todo_path = log_dir.join(TODO_FILE);
 
     // symlink チェック
-    if todo_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return ToolResult::new("TodoWrite", "ERROR: todo.json はシンボリックリンクです。書き込みを拒否しました。");
+    if todo_path
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return ToolResult::new(
+            "TodoWrite",
+            "ERROR: todo.json はシンボリックリンクです。書き込みを拒否しました。",
+        );
     }
 
     // JSON として保存
@@ -51,20 +64,32 @@ pub fn format_todos(todos: &[TodoItem]) -> String {
     let mut lines = vec!["── タスクリスト ──────────────────────────────".to_string()];
     for item in todos {
         let icon = match item.status {
-            TodoStatus::Completed  => "✓",
+            TodoStatus::Completed => "✓",
             TodoStatus::InProgress => "●",
-            TodoStatus::Pending    => "○",
+            TodoStatus::Pending => "○",
         };
         let style = match item.status {
-            TodoStatus::Completed  => "\x1b[2m",    // dim
+            TodoStatus::Completed => "\x1b[2m",     // dim
             TodoStatus::InProgress => "\x1b[1;36m", // cyan bold
-            TodoStatus::Pending    => "",
+            TodoStatus::Pending => "",
         };
-        lines.push(format!("  {style}{icon} [{}] {}\x1b[0m", item.id, item.content));
+        lines.push(format!(
+            "  {style}{icon} [{}] {}\x1b[0m",
+            item.id, item.content
+        ));
     }
-    let pending   = todos.iter().filter(|t| t.status == TodoStatus::Pending).count();
-    let in_prog   = todos.iter().filter(|t| t.status == TodoStatus::InProgress).count();
-    let completed = todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    let pending = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::Pending)
+        .count();
+    let in_prog = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::InProgress)
+        .count();
+    let completed = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
     lines.push(format!(
         "──────────────────────────────────────────────\n  完了:{completed}  進行中:{in_prog}  未着手:{pending}"
     ));
@@ -88,9 +113,21 @@ mod tests {
 
     fn make_todos() -> Vec<TodoItem> {
         vec![
-            TodoItem { id: "1".into(), content: "executor 分割".into(), status: TodoStatus::Completed },
-            TodoItem { id: "2".into(), content: "hooks 追加".into(),    status: TodoStatus::InProgress },
-            TodoItem { id: "3".into(), content: "テスト追加".into(),    status: TodoStatus::Pending },
+            TodoItem {
+                id: "1".into(),
+                content: "executor 分割".into(),
+                status: TodoStatus::Completed,
+            },
+            TodoItem {
+                id: "2".into(),
+                content: "hooks 追加".into(),
+                status: TodoStatus::InProgress,
+            },
+            TodoItem {
+                id: "3".into(),
+                content: "テスト追加".into(),
+                status: TodoStatus::Pending,
+            },
         ]
     }
 

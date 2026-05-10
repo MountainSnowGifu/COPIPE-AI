@@ -1,5 +1,5 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 
 pub fn handle(ctx: &ToolContext<'_>, path: &str) -> ToolResult {
     let output = match ctx.resolve(path) {
@@ -11,7 +11,11 @@ pub fn handle(ctx: &ToolContext<'_>, path: &str) -> ToolResult {
                     .filter_map(|e| e.ok())
                     .map(|e| {
                         let name = e.file_name().to_string_lossy().into_owned();
-                        if e.path().is_dir() { format!("{name}/") } else { name }
+                        if e.path().is_dir() {
+                            format!("{name}/")
+                        } else {
+                            name
+                        }
                     })
                     .collect();
                 lines.sort();

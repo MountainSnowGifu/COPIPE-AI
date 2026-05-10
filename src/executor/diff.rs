@@ -101,10 +101,7 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
             di += 1;
         }
 
-        let old_count = hunk
-            .iter()
-            .filter(|(m, _)| matches!(m, ' ' | '-'))
-            .count();
+        let old_count = hunk.iter().filter(|(m, _)| matches!(m, ' ' | '-')).count();
 
         // ハンクヘッダーの行数宣言と実際のハンク内容が矛盾する場合は拒否
         // old_count == 0 は行番号省略の @@ なので検証をスキップ
