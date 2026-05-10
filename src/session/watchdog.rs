@@ -15,10 +15,11 @@ fn spin(tick: u64) -> &'static str {
 
 /// 人間らしいアイドルマウス動作を発火する（bot 検知回避）
 async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
+    // as_nanos() で秒全体を seed に使い、同ミリ秒内で同値になる問題を回避
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0) as u64;
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     // 画面上の適当な位置に小さなマウス移動を生成
     let x = 200.0 + (seed % 800) as f64;
     let y = 150.0 + ((seed / 800) % 400) as f64;
@@ -47,14 +48,18 @@ fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
         {
             return;
         }
-        use std::io::Write as IoWrite;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "{msg}\n---");
-        }
+        // Tokio ランタイムをブロックしないようファイル書き込みを別スレッドで実行
+        let msg = format!("{msg}\n---");
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write as IoWrite;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                let _ = writeln!(f, "{msg}");
+            }
+        });
     }
 }
 
@@ -114,8 +119,8 @@ pub(super) async fn wait_for_ai_message_count(
         if tokio::time::Instant::now() >= wiggle_at {
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0) as u64;
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             wiggle_at = tokio::time::Instant::now() + Duration::from_secs(5 + seed % 8); // 5〜12秒ごと
             idle_mouse_wiggle(page).await;
         }
@@ -188,7 +193,11 @@ pub(super) async fn wait_for_stable_text(
 
         if !text.is_empty() && text == last {
             stable += 1;
-            eprint!("\r  {} 確定中 ({}/{STABLE_NEEDED})          ", spin(tick), stable);
+            eprint!(
+                "\r  {} 確定中 ({}/{STABLE_NEEDED})          ",
+                spin(tick),
+                stable
+            );
             std::io::stderr().flush().ok();
             if stable >= STABLE_NEEDED {
                 tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
@@ -208,8 +217,8 @@ pub(super) async fn wait_for_stable_text(
         if tokio::time::Instant::now() >= wiggle_at {
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0) as u64;
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             wiggle_at = tokio::time::Instant::now() + Duration::from_secs(8 + seed % 10);
             idle_mouse_wiggle(page).await;
         }

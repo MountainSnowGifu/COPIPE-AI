@@ -117,6 +117,7 @@ enum TurnOutcome {
     /// AI がテキストのみ返した → JSON コマンドを改めて要求
     NudgeForJson { prompt: String },
     /// 応答からコマンドを取得できなかった → ユーザーへ通知して終了
+    #[allow(dead_code)]
     NoCommands,
     /// 最大ターン数に達した
     MaxTurns,
@@ -136,6 +137,9 @@ fn determine_outcome(
     root: &Path,
     has_successful_file_update: bool,
     consecutive_read_file: u32,
+    consecutive_ask_user: u32,
+    consecutive_edit_fail: u32,
+    last_failed_edit_path: &str,
 ) -> TurnOutcome {
     if is_done && task_requires_review_output(user_task) {
         if bot_message
@@ -153,8 +157,61 @@ fn determine_outcome(
         }
     }
 
-    // read_file 連打（8件以上）で grep/bot への誘導
-    if consecutive_read_file >= 8 && !is_done {
+    // ask_user 連打（2回以上）検知 → 手元の情報で進むよう誘導
+    if consecutive_ask_user >= 2 && !is_done {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ ask_user を連続で送っています ({consecutive_ask_user}回目)]\
+                \nユーザーの回答が短い・曖昧であっても、再度 ask_user で詳細を聞き返さないでください。\
+                \n手元の情報で最善の判断をして作業を進めてください。\
+                \n判断できないなら `bot` で現状と次のステップ候補を提示してください。\
+                \n```json\
+                \n{{\"type\": \"bot\", \"message\": \"（現状と選択肢）\"}}\
+                \n```"
+            ),
+        };
+    }
+
+    // edit / multi_edit の連続失敗（2回以上）検知 → 再読み込みを強制
+    if consecutive_edit_fail >= 2 && !is_done && !last_failed_edit_path.is_empty() {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ `{last_failed_edit_path}` への edit が {consecutive_edit_fail} 回連続で失敗しています]\n\
+                old_string が現在のファイル内容と一致していません。\n\
+                ファイルは既に変更されているか、old_string に余分な空白・改行が含まれている可能性があります。\n\
+                既に変更済みなら `bot` で完了を報告してください。\n\
+                まだ必要なら改めて read_file でファイルの実際の内容を確認し、old_string を正確に合わせてください。\n\
+                ```json\n{{\"type\":\"read_file\",\"path\":\"{last_failed_edit_path}\"}}\n```"
+            ),
+        };
+    }
+
+    // 書き込み成功後に read_file で再確認するだけの無駄ループ検知
+    // file/edit で書き込んだ直後に read_file のみ返してきた場合 → bot への誘導
+    if has_successful_file_update
+        && task_requires_file_update(user_task)
+        && !is_done
+        && !tool_results.is_empty()
+        && tool_results
+            .iter()
+            .all(|r| r.label.starts_with("ReadFile("))
+    {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [ファイルの保存は既に成功しています]\n\
+                書き込み済みのファイルを再度 read_file する必要はありません。\n\
+                `bot` で完了を報告してください。\n\
+                ```json\n{{\"type\":\"bot\",\"message\":\"完了しました。\"}}\
+```"
+            ),
+        };
+    }
+
+    // read_file 連打（4件以上）で grep/bot への誘導
+    if consecutive_read_file >= 4 && !is_done {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
                 "{ctx}\n\n\
@@ -163,6 +220,7 @@ fn determine_outcome(
                 次のいずれかを実行してください:\n\
                 1. 今読んだファイルの情報で十分なら `bot` でレビュー内容を返してください\n\
                 2. 特定の関数・変数を探すなら `grep` を使ってください\n\
+                3. 大きなファイルの続きを読む場合は offset_lines を指定して同一ターンにまとめてください\n\
                 ```json\n\
                 {{\"type\": \"grep\", \"pattern\": \"キーワード\", \"path\": \"src\"}}\n\
                 ```"
@@ -243,8 +301,10 @@ fn build_initial_prompt(user_task: &str) -> String {
             "{user_task}\n\n\
             [効率化ヒント]\n\
             - レビュー対象ファイルが依頼文から明確なら、空 grep を挟まず直接 read_file してください。\n\
+            - glob や list_dir の結果が返ったら、それを根拠に調査対象を絞り込んでください（「見つからない」と判断して list_dir を重ねないこと）。\n\
             - grep を使う場合は、必ず空でない具体的な pattern を指定してください。\n\
-            - 調査が終わったら、bot の message に具体的な指摘・根拠・改善案を省略せず書いてください。"
+            - 調査が終わったら、bot の message に具体的な指摘・根拠・改善案を省略せず書いてください。\n\
+            - 「完了しました」「次の指示をください」だけの短い bot メッセージは不可です。"
         );
     }
 
@@ -272,6 +332,13 @@ fn task_requires_review_output(task: &str) -> bool {
         || task.to_ascii_lowercase().contains("review")
         || task.contains("総括")
         || task.contains("問題点")
+        || task.contains("調査")
+        || task.contains("分析")
+        || task.contains("チェック")
+        || task.contains("調べ")
+        || task.to_ascii_lowercase().contains("check")
+        || task.to_ascii_lowercase().contains("analyz")
+        || task.to_ascii_lowercase().contains("inspect")
 }
 
 fn is_placeholder_review_message(message: &str) -> bool {
@@ -525,6 +592,9 @@ pub async fn run_agent(
     let mut parse_error_count = 0u32;
     let mut reached_max = false;
     let mut consecutive_read_file = 0u32; // read_file 連打検知用
+    let mut consecutive_ask_user = 0u32; // ask_user 連打検知用
+    let mut consecutive_edit_fail = 0u32; // 同一ファイルへの edit 連続失敗検知用
+    let mut last_failed_edit_path = String::new(); // 直前の失敗 edit のパス
     let mut rate_limiter = RateLimiter::new();
     let mut total_turns = resume.as_ref().map(|d| d.turn_count).unwrap_or(0);
     let mut has_successful_file_update = done_log.iter().any(|s| {
@@ -763,22 +833,72 @@ pub async fn run_agent(
         tool_results.extend(exec_results);
 
         // read_file 連打カウント更新
-        let all_read_file = commands
+        // Txt コマンドが混在しても read_file があれば加算する（以前は all() のため Txt 混在で誤リセットされていた）
+        let read_file_count = commands
             .iter()
-            .all(|c| matches!(c, AiCommand::ReadFile { .. }));
-        let has_grep_glob = commands.iter().any(|c| {
+            .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
+            .count() as u32;
+        let has_progress = commands.iter().any(|c| {
             matches!(
                 c,
-                AiCommand::Grep { .. } | AiCommand::Glob { .. } | AiCommand::Bot { .. }
+                AiCommand::Grep { .. }
+                    | AiCommand::Glob { .. }
+                    | AiCommand::Bot { .. }
+                    | AiCommand::File { .. }
+                    | AiCommand::Edit { .. }
+                    | AiCommand::MultiEdit { .. }
+                    | AiCommand::Patch { .. }
+                    | AiCommand::Cmd { .. }
             )
         });
-        if all_read_file && !has_grep_glob {
-            consecutive_read_file += commands
-                .iter()
-                .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
-                .count() as u32;
+        if read_file_count > 0 && !has_progress {
+            consecutive_read_file += read_file_count;
         } else {
             consecutive_read_file = 0;
+        }
+
+        // ask_user 連打カウント更新
+        if commands
+            .iter()
+            .any(|c| matches!(c, AiCommand::AskUser { .. }))
+        {
+            consecutive_ask_user += 1;
+        } else {
+            consecutive_ask_user = 0;
+        }
+
+        // edit 連続失敗カウント更新
+        // 直近の done_log エントリで同一ファイルへの edit が失敗し続けているか確認
+        {
+            let failed_edit_path = tool_results
+                .iter()
+                .filter(|r| {
+                    crate::executor::errors::is_error_output(&r.output)
+                        && (r.label.starts_with("Edit(") || r.label.starts_with("MultiEdit("))
+                })
+                .filter_map(|r| {
+                    r.label
+                        .trim_start_matches("Edit(")
+                        .trim_start_matches("MultiEdit(")
+                        .strip_suffix(')')
+                        .map(|s| s.to_string())
+                })
+                .next();
+            if let Some(path) = failed_edit_path {
+                if path == last_failed_edit_path {
+                    consecutive_edit_fail += 1;
+                } else {
+                    consecutive_edit_fail = 1;
+                    last_failed_edit_path = path;
+                }
+            } else if commands
+                .iter()
+                .any(|c| matches!(c, AiCommand::Edit { .. } | AiCommand::MultiEdit { .. }))
+            {
+                // edit コマンドが成功した場合はリセット
+                consecutive_edit_fail = 0;
+                last_failed_edit_path.clear();
+            }
         }
 
         for msg in &messages {
@@ -818,6 +938,9 @@ pub async fn run_agent(
             root,
             has_successful_file_update,
             consecutive_read_file,
+            consecutive_ask_user,
+            consecutive_edit_fail,
+            &last_failed_edit_path,
         );
 
         dbg.turn_end();

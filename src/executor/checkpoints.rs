@@ -144,10 +144,12 @@ impl CheckpointManager {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.history.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.history.is_empty()
     }

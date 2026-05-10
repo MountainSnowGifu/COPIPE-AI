@@ -8,6 +8,7 @@ use crate::command::AiCommand;
 // ─── ツール種別分類（llm-prompts.md §4 準拠） ────────────────────────────────
 
 /// 確認不要の読み取り専用ツール（Claude Code の "許可不要" ツールに対応）
+#[allow(dead_code)]
 pub const READONLY_TOOLS: &[&str] = &[
     "read_file",
     "list_dir",
@@ -33,6 +34,7 @@ pub const DESTRUCTIVE_TOOLS: &[&str] = &[
 ];
 
 /// tool_name が読み取り専用かどうかを判定する
+#[allow(dead_code)]
 pub fn is_readonly(tool_name: &str) -> bool {
     READONLY_TOOLS.contains(&tool_name)
 }

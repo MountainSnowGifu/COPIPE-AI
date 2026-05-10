@@ -5,12 +5,10 @@ mod executor;
 mod paths;
 mod session;
 
-use agent::debug_log::DebugLogger;
 use agent::{SessionStore, build_system_prompt, run_agent};
 use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW, use_unicode};
 use executor::CheckpointManager;
 use executor::LOG_DIR;
-use executor::tools;
 use session::CopilotSession;
 
 // #6: セクション分けされたヘルプ + #9: Ctrl+C 明記

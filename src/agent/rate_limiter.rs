@@ -33,9 +33,9 @@ impl RateLimiter {
     pub fn new() -> Self {
         Self {
             consecutive_issues: 0,
-            base_ms: 1_500,
+            base_ms: 800,
             max_ms: 8_000,
-            human_pause_every: 8,
+            human_pause_every: 0, // 自動エージェントでは人間らしい長停止は不要
             turn: 0,
         }
     }

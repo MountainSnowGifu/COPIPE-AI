@@ -223,9 +223,14 @@ fn is_hidden(path: &Path) -> bool {
 }
 
 fn is_inside_root(path: &Path, root: &Path) -> bool {
-    path.canonicalize()
-        .map(|c| c.starts_with(root))
-        .unwrap_or(false)
+    let canon_path = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // root も canonicalize して拡張パス形式（\\?\C:\...）を揃える
+    // 揃えないと Windows で starts_with が常に false になり glob が全件スキップする
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    canon_path.starts_with(canon_root)
 }
 
 // ─── テスト ───────────────────────────────────────────────────────────────────

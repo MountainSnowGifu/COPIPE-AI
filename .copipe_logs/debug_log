@@ -1,23 +1,25 @@
 
-=== TURN 1/30 [2026-05-10 20:39:05 JST] ===
-[PROMPT] 173 chars:
+=== TURN 1/30 [2026-05-10 22:57:42 JST] ===
+[PROMPT] 297 chars:
 ---PROMPT START---
 全体コードレビューして
 
 [効率化ヒント]
 - レビュー対象ファイルが依頼文から明確なら、空 grep を挟まず直接 read_file してください。
+- glob や list_dir の結果が返ったら、それを根拠に調査対象を絞り込んでください（「見つからない」と判断して list_dir を重ねないこと）。
 - grep を使う場合は、必ず空でない具体的な pattern を指定してください。
 - 調査が終わったら、bot の message に具体的な指摘・根拠・改善案を省略せず書いてください。
+- 「完了しました」「次の指示をください」だけの短い bot メッセージは不可です。
 ---PROMPT END---
 [SESSION] read_files=0 done_log=0
   read: (なし)
   done: (なし)
-[TIMING] 18.46s
+[TIMING] 92.50s
 ---
 
-=== TURN 2/30 [2026-05-10 20:39:24 JST] ===
-[RATE_LIMITER] consecutive_issues=0 wait=2.6s
-[PROMPT] 1210 chars:
+=== TURN 2/30 [2026-05-10 22:59:15 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=1.2s
+[PROMPT] 191 chars:
 ---PROMPT START---
 ## Static context
 [元のタスク] 全体コードレビューして
@@ -25,277 +27,66 @@
 ## Dynamic context
 [完了済みアクション] ✓ Glob(src/**/*.rs)
 
+→ 次のアクションを ```json コードブロックで出力してください
+
 ## Tool results
 [ツール実行結果]
 
 [#2 → Glob(src/**/*.rs)]
-src/agent/context.rs
-src/agent/debug_log.rs
-src/agent/log.rs
-src/agent/mod.rs
-src/agent/parser.rs
-src/agent/prompt.rs
-src/agent/rate_limiter.rs
-src/agent/runner.rs
-src/agent/session_store.rs
-src/color.rs
-src/command.rs
-src/executor/checkpoints.rs
-src/executor/context.rs
-src/executor/diff.rs
-src/executor/errors.rs
-src/executor/hooks.rs
-src/executor/mod.rs
-src/executor/pre_hooks.rs
-src/executor/safety.rs
-src/executor/tools/ask_user.rs
-src/executor/tools/cmd.rs
-src/executor/tools/delete_file.rs
-src/executor/tools/edit.rs
-src/executor/tools/glob.rs
-src/executor/tools/grep.rs
-src/executor/tools/list_dir.rs
-src/executor/tools/mkdir.rs
-src/executor/tools/mod.rs
-src/executor/tools/multi_edit.rs
-src/executor/tools/patch.rs
-src/executor/tools/read_file.rs
-src/executor/tools/read_log.rs
-src/executor/tools/todo_write.rs
-src/executor/tools/web_fetch.rs
-src/executor/tools/worktree.rs
-src/executor/tools/write_file.rs
-src/lib.rs
-src/main.rs
-src/paths.rs
-src/session/browser.rs
-src/session/dom.rs
-src/session/mod.rs
-src/session/page.rs
-src/session/watchdog.rs
 
-[44 ファイル]
+
+[45 ファイル]
 ---PROMPT END---
 [SESSION] read_files=0 done_log=1
   read: (なし)
   done: ✓ Glob(src/**/*.rs)
-[TIMING] 25.24s
+[TIMING] 21.52s
 ---
 
-=== TURN 3/30 [2026-05-10 20:39:49 JST] ===
-[RATE_LIMITER] consecutive_issues=0 wait=1.6s
-[PROMPT] 8348 chars:
+=== TURN 3/30 [2026-05-10 22:59:36 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=1.2s
+[PROMPT] 418 chars:
 ---PROMPT START---
 ## Static context
 [元のタスク] 全体コードレビューして
 
 ## Dynamic context
-[完了済みアクション]
-[Context compacted — summary of 3 earlier actions (✓3)]
-✓ Glob(src/**/*.rs) | ✓ Grep(unwrap( in src) | ✓ Grep(expect( in src)
-[Recent] ✓ Grep(panic! in src) → ✓ Grep(unsafe in src) → ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
+[完了済みアクション] ✓ Glob(src/**/*.rs) → ✓ Grep(fn main in src)
+
+→ 次のアクションを ```json コードブロックで出力してください
 
 ## Tool results
 [ツール実行結果]
 
-[#2 → Grep(unwrap( in src)]
+[#2 → Grep(fn main in src)]
 
-── ~/デスクトップ/Rust/COPIPE-AI/src/agent/session_store.rs ──
-  161:         assert!(store.exists());
-  162: 
-> 163:         let loaded = store.load().unwrap();
-  164:         assert_eq!(loaded.user_task, "コードレビューして");
-  165:         assert_eq!(loaded.turn_count, 5);
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/command.rs ──
-  218:     #[test]
-  219:     fn parse_commands_accepts_add_alias() {
-> 220:         let cmds = parse_commands(r#"{"type":"add","path":"a.txt","content":"hello"}"#).unwrap();
-  221:         assert!(
-  222:             matches!(cmds.as_slice(), [AiCommand::File { path, content }] if path == "a.txt" && content == "hello")
-      ···
-  228:         let cmds =
-  229:             parse_commands(r#"{"type":"edit","path":"src/main.rs","patch":"@@\n-old\n+new\n"}"#)
-> 230:                 .unwrap();
-  231:         assert!(
-  232:             matches!(cmds.as_slice(), [AiCommand::Patch { path, diff }] if path == "src/main.rs" && diff.contains("+new"))
-      ···
-  236:     #[test]
-  237:     fn parse_commands_strips_json_prefix() {
-> 238:         let cmds = parse_commands("json [{\"type\":\"txt\",\"content\":\"ok\"}]").unwrap();
-  239:         assert!(matches!(cmds.as_slice(), [AiCommand::Txt { content }] if content == "ok"));
-  240:     }
-      ···
-  248: ]"#;
-  249: 
-> 250:         let cmds = parse_commands(input).unwrap();
-  251: 
-  252:         assert_eq!(cmds.len(), 3);
-      ···
-  261:             r#"{"type":"grep","pattern":"","path":"src/agent/debug_log.rs","context_lines":0}"#,
-  262:         )
-> 263:         .unwrap();
-  264: 
-  265:         assert!(
+── \\?\~\OneDrive\Desktop\RUST\COPIPE-AI\src\main.rs ──
+   51: 
+   52: #[tokio::main]
+>  53: async fn main() -> anyhow::Result<()> {
+   54:     use rustyline::error::ReadlineError;
+   55: 
       ···
 
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/checkpoints.rs ──
-  161: 
-  162:     fn setup() -> (tempfile::TempDir, CheckpointManager) {
-> 163:         let dir = tempfile::tempdir().unwrap();
-  164:         let mgr = CheckpointManager::new(dir.path());
-  165:         (dir, mgr)
-      ···
-  170:         let (dir, mut mgr) = setup();
-  171:         let file = dir.path().join("test.rs");
-> 172:         std::fs::write(&file, "original content").unwrap();
-  173: 
-  174:         // チェックポイント保存
-      ···
-  178: 
-  179:         // ファイルを変更
-> 180:         std::fs::write(&file, "modified content").unwrap();
-  181: 
-  182:         // Undo で復元
-      ···
-  181: 
-  182:         // Undo で復元
-> 183:         let result = mgr.undo().unwrap();
-  184:         assert!(result.is_some());
-  185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
-      ···
-  183:         let result = mgr.undo().unwrap();
-  184:         assert!(result.is_some());
-> 185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
-  186:         assert_eq!(mgr.len(), 0);
-  187:     }
-      ···
-  190:     fn test_undo_empty_returns_none() {
-  191:         let (_dir, mut mgr) = setup();
-> 192:         let result = mgr.undo().unwrap();
-  193:         assert!(result.is_none());
-  194:     }
-      ···
-  200: 
-  201:         let file = dir.path().join("f.rs");
-> 202:         std::fs::write(&file, "x").unwrap();
-  203: 
-  204:         for _ in 0..=MAX_CHECKPOINTS {
-      ···
-  214:         let file1 = dir.path().join("a.rs");
-  215:         let file2 = dir.path().join("b.rs");
-> 216:         std::fs::write(&file1, "a").unwrap();
-  217:         std::fs::write(&file2, "b").unwrap();
-  218: 
-      ···
-  215:         let file2 = dir.path().join("b.rs");
-  216:         std::fs::write(&file1, "a").unwrap();
-> 217:         std::fs::write(&file2, "b").unwrap();
-  218: 
-  219:         mgr.save(&file1, "a", "write");
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/context.rs ──
-   93:     #[test]
-   94:     fn rejects_windows_absolute_paths_on_all_targets() {
->  95:         let dir = tempfile::tempdir().unwrap();
-   96:         let mut read_files = HashSet::new();
-   97:         let mut checkpoints = CheckpointManager::new(dir.path());
-      ···
-  104:     #[test]
-  105:     fn rejects_windows_parent_components_on_all_targets() {
-> 106:         let dir = tempfile::tempdir().unwrap();
-  107:         let mut read_files = HashSet::new();
-  108:         let mut checkpoints = CheckpointManager::new(dir.path());
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/edit.rs ──
-  160:         let result = content_after_edit(src, old, new);
-  161:         assert!(result.is_some());
-> 162:         assert!(result.unwrap().contains("hello!"));
-  163:     }
-  164: }
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/glob.rs ──
-  266:     #[test]
-  267:     fn test_handle_src_recursive_pattern() {
-> 268:         let dir = tempfile::tempdir().unwrap();
-  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-      ···
-  267:     fn test_handle_src_recursive_pattern() {
-  268:         let dir = tempfile::tempdir().unwrap();
-> 269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-      ···
-  268:         let dir = tempfile::tempdir().unwrap();
-  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-> 270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-      ···
-  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-> 271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-  273: 
-      ···
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-> 272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-  273: 
-  274:         let mut read_files = std::collections::HashSet::new();
-      ···
-  285:     #[test]
-  286:     fn test_handle_windows_separator_pattern() {
-> 287:         let dir = tempfile::tempdir().unwrap();
-  288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-      ···
-  286:     fn test_handle_windows_separator_pattern() {
-  287:         let dir = tempfile::tempdir().unwrap();
-> 288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  290:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-      ···
-  287:         let dir = tempfile::tempdir().unwrap();
-  288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-> 289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  290:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  291:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-      ···
-  288:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-> 290:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  291:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-  292: 
-      ···
-  289:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  290:         std::fs::wri
-...[348 文字以降省略]
+[1 件のマッチ]
 ---PROMPT END---
-[SESSION] read_files=0 done_log=8
+[SESSION] read_files=0 done_log=2
   read: (なし)
-  done: ✓ Grep(panic! in src) → ✓ Grep(unsafe in src) → ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
-[TIMING] 24.79s
+  done: ✓ Glob(src/**/*.rs) → ✓ Grep(fn main in src)
+[TIMING] 22.50s
 ---
 
-=== TURN 4/30 [2026-05-10 20:40:14 JST] ===
-[RATE_LIMITER] consecutive_issues=0 wait=2.7s
-[PROMPT] 8657 chars:
+=== TURN 4/30 [2026-05-10 22:59:59 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=1.5s
+[PROMPT] 8169 chars:
 ---PROMPT START---
 ## Static context
 [元のタスク] 全体コードレビューして
 
 ## Dynamic context
-[読み込み済みファイル（再読み不要）] src/lib.rs, src/main.rs
-[完了済みアクション]
-[Context compacted — summary of 9 earlier actions (✓9)]
-✓ Glob(src/**/*.rs) | ✓ Grep(unwrap( in src) | ✓ Grep(expect( in src) | ✓ Grep(panic! in src) | ✓ Grep(unsafe in src) | ✓ Grep(TODO in src) | ✓ Grep(todo! in src) | ✓ Grep(dbg!( in src) | ✓ ReadFile(src/main.rs)
-[Recent] ✓ ReadFile(src/lib.rs) → ✓ ReadFile(src/executor/mod.rs) → ✓ ReadFile(src/agent/mod.rs) → ✓ ReadFile(src/executor/context.rs) → ✓ ReadFile(src/executor/tools/grep.rs)
-[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。または十分な情報が揃っているなら今すぐ bot で回答してください。
+[完了済みアクション] ✓ Glob(src/**/*.rs) → ✓ Grep(fn main in src) → ✓ ReadFile(src/main.rs)
+
+→ 次のアクションを ```json コードブロックで出力してください
 
 ## Tool results
 [ツール実行結果]
@@ -309,12 +100,10 @@ mod executor;
 mod paths;
 mod session;
 
-use agent::debug_log::DebugLogger;
 use agent::{SessionStore, build_system_prompt, run_agent};
 use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW, use_unicode};
 use executor::CheckpointManager;
 use executor::LOG_DIR;
-use executor::tools;
 use session::CopilotSession;
 
 // #6: セクション分けされたヘルプ + #9: Ctrl+C 明記
@@ -510,515 +299,255 @@ async fn main() -> anyhow::Result<()> {
         };
         let mut task = String::new();
         loop {
-            let 
-...[657 文字以降省略]
+            let prompt_str = if task.is_empty() { base_prompt } else { "... " };
+            match rl.readline(prompt_str) {
+                Ok(line) => {
+                    rl.add_history_entry(line.as_str()).ok();
+                    if line.ends_with('\\') {
+                        task.push_str(&line[..line.len() - 1]);
+   
+...[169 文字以降省略]
 ---PROMPT END---
-[SESSION] read_files=2 done_log=14
-  read: src/lib.rs, src/main.rs
-  done: ✓ ReadFile(src/lib.rs) → ✓ ReadFile(src/executor/mod.rs) → ✓ ReadFile(src/agent/mod.rs) → ✓ ReadFile(src/executor/context.rs) → ✓ ReadFile(src/executor/tools/grep.rs)
-[TIMING] 23.67s
+[SESSION] read_files=0 done_log=3
+  read: (なし)
+  done: ✓ Glob(src/**/*.rs) → ✓ Grep(fn main in src) → ✓ ReadFile(src/main.rs)
+[TIMING] 20.13s
 ---
 
-=== TURN 5/30 [2026-05-10 20:40:37 JST] ===
-[RATE_LIMITER] consecutive_issues=0 wait=2.0s
-[PROMPT] 8255 chars:
+=== TURN 5/30 [2026-05-10 23:00:19 JST] ===
+[RATE_LIMITER] consecutive_issues=0 wait=1.5s
+[PROMPT] 8225 chars:
 ---PROMPT START---
 ## Static context
 [元のタスク] 全体コードレビューして
 
 ## Dynamic context
-[読み込み済みファイル（再読み不要）] src/lib.rs, src/main.rs
-[完了済みアクション]
-[Context compacted — summary of 18 earlier actions (✓18)]
-[Recent] ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
+[読み込み済みファイル（再読み不要）] 
+[完了済みアクション] ✓ Glob(src/**/*.rs) → ✓ Grep(fn main in src) → ✓ ReadFile(src/main.rs) → ✓ ReadFile(src/main.rs@150)
+
+→ 次のアクションを ```json コードブロックで出力してください
 
 ## Tool results
 [ツール実行結果]
 
-[#2 → Grep(unwrap( in src)]
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/agent/session_store.rs ──
-  160:         store.save(&root, "コードレビューして", 5, &done_log, &read_files);
-  161:         assert!(store.exists());
-  162: 
-> 163:         let loaded = store.load().unwrap();
-  164:         assert_eq!(loaded.user_task, "コードレビューして");
-  165:         assert_eq!(loaded.turn_count, 5);
-  166:         assert_eq!(loaded.done_log.len(), 2);
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/command.rs ──
-  217: 
-  218:     #[test]
-  219:     fn parse_commands_accepts_add_alias() {
-> 220:         let cmds = parse_commands(r#"{"type":"add","path":"a.txt","content":"hello"}"#).unwrap();
-  221:         assert!(
-  222:             matches!(cmds.as_slice(), [AiCommand::File { path, content }] if path == "a.txt" && content == "hello")
-  223:         );
-      ···
-  227:     fn parse_commands_accepts_edit_patch_shape() {
-  228:         let cmds =
-  229:             parse_commands(r#"{"type":"edit","path":"src/main.rs","patch":"@@\n-old\n+new\n"}"#)
-> 230:                 .unwrap();
-  231:         assert!(
-  232:             matches!(cmds.as_slice(), [AiCommand::Patch { path, diff }] if path == "src/main.rs" && diff.contains("+new"))
-  233:         );
-      ···
-  235: 
-  236:     #[test]
-  237:     fn parse_commands_strips_json_prefix() {
-> 238:         let cmds = parse_commands("json [{\"type\":\"txt\",\"content\":\"ok\"}]").unwrap();
-  239:         assert!(matches!(cmds.as_slice(), [AiCommand::Txt { content }] if content == "ok"));
-  240:     }
-  241: 
-      ···
-  247:   {"type":"add","path":"tests/debug_log_tests.rs","content":"use tempfile::tempdir;\n"}
-  248: ]"#;
-  249: 
-> 250:         let cmds = parse_commands(input).unwrap();
-  251: 
-  252:         assert_eq!(cmds.len(), 3);
-  253:         assert!(matches!(cmds[0], AiCommand::ReadFile { .. }));
-      ···
-  260:         let cmds = parse_commands(
-  261:             r#"{"type":"grep","pattern":"","path":"src/agent/debug_log.rs","context_lines":0}"#,
-  262:         )
-> 263:         .unwrap();
-  264: 
-  265:         assert!(
-  266:             matches!(cmds.as_slice(), [AiCommand::ReadFile { path, offset_lines }] if path == "src/agent/debug_log.rs" && *offset_lines == 0)
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/checkpoints.rs ──
-  160:     use super::*;
-  161: 
-  162:     fn setup() -> (tempfile::TempDir, CheckpointManager) {
-> 163:         let dir = tempfile::tempdir().unwrap();
-  164:         let mgr = CheckpointManager::new(dir.path());
-  165:         (dir, mgr)
-  166:     }
-      ···
-  169:     fn test_save_and_undo() {
-  170:         let (dir, mut mgr) = setup();
-  171:         let file = dir.path().join("test.rs");
-> 172:         std::fs::write(&file, "original content").unwrap();
-  173: 
-  174:         // チェックポイント保存
-  175:         let id = mgr.save(&file, "original content", "edit");
-      ···
-  177:         assert_eq!(mgr.len(), 1);
-  178: 
-  179:         // ファイルを変更
-> 180:         std::fs::write(&file, "modified content").unwrap();
-  181: 
-  182:         // Undo で復元
-  183:         let result = mgr.undo().unwrap();
-      ···
-  180:         std::fs::write(&file, "modified content").unwrap();
-  181: 
-  182:         // Undo で復元
-> 183:         let result = mgr.undo().unwrap();
-  184:         assert!(result.is_some());
-  185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
-  186:         assert_eq!(mgr.len(), 0);
-      ···
-  182:         // Undo で復元
-  183:         let result = mgr.undo().unwrap();
-  184:         assert!(result.is_some());
-> 185:         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original content");
-  186:         assert_eq!(mgr.len(), 0);
-  187:     }
-  188: 
-      ···
-  189:     #[test]
-  190:     fn test_undo_empty_returns_none() {
-  191:         let (_dir, mut mgr) = setup();
-> 192:         let result = mgr.undo().unwrap();
-  193:         assert!(result.is_none());
-  194:     }
-  195: 
-      ···
-  199:         mgr.history.clear();
-  200: 
-  201:         let file = dir.path().join("f.rs");
-> 202:         std::fs::write(&file, "x").unwrap();
-  203: 
-  204:         for _ in 0..=MAX_CHECKPOINTS {
-  205:             mgr.save(&file, "x", "edit");
-      ···
-  213:         let (dir, mut mgr) = setup();
-  214:         let file1 = dir.path().join("a.rs");
-  215:         let file2 = dir.path().join("b.rs");
-> 216:         std::fs::write(&file1, "a").unwrap();
-  217:         std::fs::write(&file2, "b").unwrap();
-  218: 
-  219:         mgr.save(&file1, "a", "write");
-      ···
-  214:         let file1 = dir.path().join("a.rs");
-  215:         let file2 = dir.path().join("b.rs");
-  216:         std::fs::write(&file1, "a").unwrap();
-> 217:         std::fs::write(&file2, "b").unwrap();
-  218: 
-  219:         mgr.save(&file1, "a", "write");
-  220:         mgr.save(&file2, "b", "edit");
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/context.rs ──
-   92: 
-   93:     #[test]
-   94:     fn rejects_windows_absolute_paths_on_all_targets() {
->  95:         let dir = tempfile::tempdir().unwrap();
-   96:         let mut read_files = HashSet::new();
-   97:         let mut checkpoints = CheckpointManager::new(dir.path());
-   98:         let ctx = context_for(dir.path(), &mut read_files, &mut checkpoints);
-      ···
-  103: 
-  104:     #[test]
-  105:     fn rejects_windows_parent_components_on_all_targets() {
-> 106:         let dir = tempfile::tempdir().unwrap();
-  107:         let mut read_files = HashSet::new();
-  108:         let mut checkpoints = CheckpointManager::new(dir.path());
-  109:         let ctx = context_for(dir.path(), &mut read_files, &mut checkpoints);
-      ···
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/edit.rs ──
-  159:         let new = "fn hello() {\n    println!(\"hello!\");\n}";
-  160:         let result = content_after_edit(src, old, new);
-  161:         assert!(result.is_some());
-> 162:         assert!(result.unwrap().contains("hello!"));
-  163:     }
-  164: }
-
-── ~/デスクトップ/Rust/COPIPE-AI/src/executor/tools/glob.rs ──
-  265: 
-  266:     #[test]
-  267:     fn test_handle_src_recursive_pattern() {
-> 268:         let dir = tempfile::tempdir().unwrap();
-  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-      ···
-  266:     #[test]
-  267:     fn test_handle_src_recursive_pattern() {
-  268:         let dir = tempfile::tempdir().unwrap();
-> 269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-      ···
-  267:     fn test_handle_src_recursive_pattern() {
-  268:         let dir = tempfile::tempdir().unwrap();
-  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-> 270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-  271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-  273: 
-      ···
-  268:         let dir = tempfile::tempdir().unwrap();
-  269:         std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
-  270:         std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
-> 271:         std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
-  272:         std::fs::write(dir.path().join("src/agent/readme.md"), "").unwrap();
-  273: 
-  274:         let mut read_files = std::col
-...[255 文字以降省略]
----PROMPT END---
-[SESSION] read_files=2 done_log=21
-  read: src/lib.rs, src/main.rs
-  done: ✓ Grep(panic! in src) → ✓ Grep(unsafe in src) → ✓ Grep(TODO in src) → ✓ Grep(todo! in src) → ✓ Grep(dbg!( in src)
-[TIMING] 24.63s
----
-
-=== TURN 6/30 [2026-05-10 20:41:02 JST] ===
-[RATE_LIMITER] consecutive_issues=0 wait=2.0s
-[PROMPT] 7433 chars:
----PROMPT START---
-## Static context
-[元のタスク] 全体コードレビューして
-
-## Dynamic context
-[読み込み済みファイル（再読み不要）] src/agent/session_store.rs, src/command.rs, src/lib.rs, src/main.rs
-[完了済みアクション]
-[Context compacted — summary of 25 earlier actions (✓25)]
-[Recent] ✓ ReadFile(src/executor/tools/glob.rs) → ✓ ReadFile(src/executor/tools/grep.rs) → ✓ ReadFile(src/executor/tools/edit.rs)
-[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。または十分な情報が揃っているなら今すぐ bot で回答してください。
-
-## Tool results
-[ツール実行結果]
-
-[#2 → ReadFile(src/agent/session_store.rs)]
+[#2 → ReadFile(src/main.rs@150)]
 ```
-/// セッション保存・復元（core-internals.md §7 session.mjs を参考）
-///
-/// run_agent() の状態（read_files / done_log）をターンごとにディスクに保存する。
-/// 20ターン上限・Ctrl+C・クラッシュ後も「続きから」再開できる。
-///
-/// 保存先: ホームディレクトリ配下の .copipe_sessions/<path_hash16>/session.json
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+                "{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・状態を記録します{RESET}"
+            );
+        }
+    }
+    println!("{DIM}ヘルプは :h  Ctrl+C でキャンセル  終了は exit または Ctrl+D{RESET}");
 
-const SESSION_VERSION: u32 = 1;
+    // #8: 初回起動時のみログディレクトリを案内
+    if is_first_run {
+        println!(
+            "{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log){RESET}",
+            log_dir.display()
+        );
+    }
 
-// ─── データ構造 ───────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionData {
-    pub version: u32,
-    pub project_dir: String, // root の絶対パス
-    pub user_task: String,
-    pub turn_count: u32,
-    pub saved_at: String,        // JST タイムスタンプ
-    pub done_log: Vec<String>,   // "✓ label" / "✗ label" の履歴
-    pub read_files: Vec<String>, // root からの相対パス
-}
-
-// ─── セッションストア ─────────────────────────────────────────────────────────
-
-pub struct SessionStore {
-    session_path: PathBuf,
-}
-
-impl SessionStore {
-    /// root に紐づいたセッションストアを作成する
-    pub fn new(root: &Path) -> Self {
-        let hash = path_hash16(root);
-        let dir = session_dir_for_hash(&hash);
-        Self {
-            session_path: dir.join("session.json"),
+    // 前回セッションが残っていれば案内（ただし即座に復元はしない — タスク入力時に判断）
+    if session_store.exists() {
+        if let Some(ref prev) = session_store.load() {
+            println!(
+                "{YELLOW}前回の未完了セッションがあります: 「{}」（{}ターン完了済み / {}）{RESET}",
+                prev.user_task, prev.turn_count, prev.saved_at
+            );
+            println!(
+                "{DIM}同じタスクを入力すると続きから再開します。別のタスクを入力すると新規開始します。{RESET}"
+            );
         }
     }
 
-    /// セッションデータを保存する
-    pub fn save(
-        &self,
-        root: &Path,
-        user_task: &str,
-        turn_count: u32,
-        done_log: &[String],
-        read_files_abs: &std::collections::HashSet<PathBuf>,
-    ) {
-        let read_files: Vec<String> = {
-            let mut v: Vec<String> = read_files_abs
-                .iter()
-                .filter_map(|p| p.strip_prefix(root).ok().map(|r| r.display().to_string()))
-                .collect();
-            v.sort();
-            v
+    let mut rl = rustyline::DefaultEditor::new()?;
+    let history_path = paths::home_dir().map(|h| h.join(".copipe_ai_history"));
+    if let Some(ref p) = history_path {
+        rl.load_history(p).ok();
+    }
+
+    'repl: loop {
+        // ── 入力フェーズ（行末 \ でマルチライン継続） ──────────────────
+        // #7: Worktree 使用中かチェックしてプロンプトに反映
+        let in_worktree = executor::tools::worktree::load_state(&root).is_some();
+        let base_prompt: &str = &{
+            let mut tags: Vec<&str> = Vec::new();
+            if in_worktree {
+                tags.push("worktree");
+            }
+            if auto_confirm {
+                tags.push("自動確認");
+            }
+            if verbose {
+                tags.push("詳細");
+            }
+            if tags.is_empty() {
+                "\n> ".to_string()
+            } else {
+                format!("\n[{}]> ", tags.join(","))
+            }
+        };
+        let mut task = String::new();
+        loop {
+            let prompt_str = if task.is_empty() { base_prompt } else { "... " };
+            match rl.readline(prompt_str) {
+                Ok(line) => {
+                    rl.add_history_entry(line.as_str()).ok();
+                    if line.ends_with('\\') {
+                        task.push_str(&line[..line.len() - 1]);
+                        task.push('\n');
+                    } else {
+                        task.push_str(&line);
+                        break;
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    if !task.is_empty() {
+                        task.clear();
+                        println!("{DIM}入力をクリアしました{RESET}");
+                    } else {
+                        println!("{DIM}(Ctrl+D で終了){RESET}");
+                    }
+                    continue 'repl;
+                }
+                Err(ReadlineError::Eof) => break 'repl,
+                Err(e) => {
+                    println!("{RED_BOLD}入力エラー: {e}{RESET}");
+                    break 'repl;
+                }
+            }
+        }
+
+        let task = clean_task_input(&task);
+        if task.is_empty() {
+            continue;
+        }
+        match task.as_str() {
+            "exit" | "quit" => break,
+            ":h" => {
+                print_help(verbose, auto_confirm, debug);
+                continue 'repl;
+            }
+            ":v" => {
+                verbose = !verbose;
+                println!(
+                    "詳細ログ: {BOLD}{}{RESET}",
+                    if verbose { "ON" } else { "OFF" }
+                );
+                continue 'repl;
+            }
+            ":y" => {
+                auto_confirm = !auto_confirm;
+                println!(
+                    "自動確認: {BOLD}{}{RESET}",
+                    if auto_confirm { "ON" } else { "OFF" }
+                );
+                continue 'repl;
+            }
+            ":d" | ":debug" => {
+                debug = !debug;
+                println!(
+                    "デバッグ: {BOLD}{}{RESET}",
+                    if debug {
+                        "ON (.copipe_logs/debug_log へ記録)"
+                    } else {
+                        "OFF"
+                    }
+                );
+                continue 'repl;
+            }
+            ":undo list" => {
+                let list = checkpoints.list();
+                if list.is_empty() {
+                    println!("{DIM}チェックポイントはありません{RESET}");
+                } else {
+                    println!(
+                        "{BOLD}── チェックポイント（新しい順、:undo / :undo 0 / :undo 1 ...）──{RESET}"
+                    );
+                    for (i, (path, op)) in list.iter().enumerate() {
+                        println!("  {DIM}[{i}]{RESET} ↩ {path} ({op})");
+                    }
+                }
+                continue 'repl;
+            }
+            cmd if cmd == ":undo" || cmd.starts_with(":undo ") => {
+                // :undo → 最新1件、:undo N → N番目を復元
+                let idx: Option<usize> = cmd
+                    .strip_prefix(":undo ")
+                    .and_then(|s| s.trim().parse().ok());
+                let result = if let Some(n) = idx {
+                    checkpoints.undo_at(n)
+                } else {
+                    checkpoints.undo()
+                };
+                match result {
+                    Ok(Some((path, op))) => {
+                        println!("{GREEN_BOLD}✓{RESET} 復元しました: {path} ({op})")
+                    }
+                    Ok(None) => println!("{YELLOW}チェックポイントがありません{RESET}"),
+                    Err(e) => println!("{RED_BOLD}復元失敗: {e}{RESET}"),
+                }
+                continue 'repl;
+            }
+            _ => {}
+        }
+
+        // タスク末尾の :y で1回だけ確認スキップ
+        let (task, skip_confirm) = if task.ends_with(":y") {
+            (task[..task.len() - 2].trim().to_string(), true)
+        } else {
+            (task, false)
         };
 
-        let data = SessionData {
-            version: SESSION_VERSION,
-            project_dir: root.display().to_string(),
-            user_task: user_task.to_string(),
-            turn_count,
-            saved_at: crate::executor::now_timestamp(),
-            done_log: done_log.to_vec(),
-            read_files,
-        };
-
-        if let Ok(json) = serde_json::to_string_pretty(&data) {
-            std::fs::write(&self.session_path, json).ok();
+        // ── 確認ステップ ──────────────────────────────────────────────
+        println!("┌─ タスク ─────────────────────────────────────────");
+        for line in task.lines() {
+            println!("│ {line}");
         }
-    }
+        println!("└──────────────────────────────────────────────────");
 
-    /// 保存済みセッションをロードする（なければ None）
-    pub fn load(&self) -> Option<SessionData> {
-        let json = std::fs::read_to_string(&self.session_path).ok()?;
-        let data: SessionData = serde_json::from_str(&json).ok()?;
-        if data.version != SESSION_VERSION {
-            return None;
+        if !auto_confirm && !skip_confirm {
+            // #3: Enter=実行 / n=中止 を明示
+            let confirmed = 'confirm: loop {
+                match rl.readline("実行しますか? [Enter=実行 / n=中止] ") {
+                    Ok(ans) => match ans.trim() {
+                        "" | "y" | "Y" => break 'confirm Some(true),
+                        "n" | "N" => break 'confirm Some(false),
+                        other => {
+                            println!("{DIM}「{other}」は無効です。Enter で実行、n で中止{RESET}")
+                        }
+                    },
+                    Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                        break 'confirm Some(false);
+                    }
+                    Err(e) => {
+                        println!("{RED_BOLD}入力エラー: {e}{RESET}");
+                        break 'confirm None;
+                    }
+                }
+            };
+            match confirmed {
+                Some(true) => {}
+                Some(false) => {
+                    println!("{DIM}キャンセルしました{RESET}");
+                    continue 'repl;
+                }
+                None => break 'repl,
+            }
         }
-        Some(data)
-    }
 
-    /// セッションファイルを削除する（正常完了時）
-    pub fn clear(&self) {
-        std::fs::remove_file(&self.session_path).ok();
-    }
-
-    pub fn exists(&self) -> bool {
-        self.session_path.exists()
-    }
-}
-
-// ─── ユーティリティ ───────────────────────────────────────────────────────────
-
-/// セッション保存ディレクトリのパスを返す
-fn home_sessions_dir() -> PathBuf {
-    crate::paths::home_dir()
-        .map(|h| h.join(".copipe_sessions"))
-        .unwrap_or_else(|| std::env::temp_dir().join("copipe_sessions"))
-}
-
-fn session_dir_for_hash(hash: &str) -> PathBuf {
-    let primary = home_sessions_dir().join(hash);
-    if ensure_writable_dir(&primary) {
-        return primary;
-    }
-
-    let fallback = std::env::temp_dir().join("copipe_sessions").join(hash);
-    ensure_writable_dir(&fallback);
-    fallback
-}
-
-fn ensure_writable_dir(dir: &Path) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let probe = dir.join(".write_probe");
-    match std::fs::write(&probe, b"ok") {
-        Ok(_) => {
-            let _ = std::fs::remove_file(probe);
-            true
+        // ── 実行フェーズ（Ctrl+C でキャンセル） ───────────────────────
+        // 前回セッションがあり、タスクが同じなら自動復元
+        let resume = session_store.load().filter(|s| s.user_task == task);
+        if resume.is_some() {
+            println!("{DIM}前回の続きから再開します...{RESET}");
         }
-        Err(_) => false,
-    }
-}
-
-/// パスを16文字の16進ハッシュに変換する（ディレクトリ名用）
-fn path_hash16(path: &Path) -> String {
-    let s = path.display().to_string();
-    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3); // FNV prime
-    }
-    format!("{h:016x}")
-}
-
-// ─── テスト ───────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn test_save_and_load() {
-        let root = std::env::temp_dir().join("copipe_test_sess");
-        std::fs::create_dir_all(&root).ok();
-        let store = SessionStore::new(&root);
-
-        let mut read_files = HashSet::new();
-        read_files.insert(root.join("src/main.rs"));
-        read_files.insert(root.join("src/lib.rs"));
-        let done_log = vec![
-            "✓ ListDir(src)".to_string(),
-            "✓ ReadFile(src/main.rs)".to_string(),
-        ];
-
-        store.save(&root, "コードレビューして", 5, &done_log, &read_files);
-        assert!(store.exists());
-
-        let loaded = store.load().unwrap();
-        assert_eq!(loaded.user_task, "コードレビューして");
-        assert_eq!(loaded.turn_count, 5);
-        assert_eq!(loaded.done_log.len(), 2);
-        assert_eq!(loaded.read_files.len(), 2);
-        assert!(loaded.read_files.iter().any(|f| f.contains("main.rs")));
-
-        store.clear();
-        assert!(!store.exists());
-    }
-
-    #[test]
-    fn test_path_hash16_is_consistent() {
-        let p = Path::new("/home/user/myproject");
-        let h1 = path_hash16(p);
-        let h2 = path_hash16(p);
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 16);
-    }
-
-    #[test]
-    fn test_path_hash16_different_paths() {
-        let h1 = path_hash16(Path::new("/home/user/project_a"));
-        let h2 = path_hash16(Path::new("/home/user/project_b"));
-        assert_ne!(h1, h2);
-    }
-}
-
-```
-
-[#3 → ReadFile(src/command.rs)]
-```
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-/// p.txt で定義された全コマンド型
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AiCommand {
-    Cmd {
-        name: String,
-        cmd: Vec<String>,
-        workdir: Option<String>,
-        timeout: u64,
-    },
-    Txt {
-        content: String,
-    },
-    File {
-        path: String,
-        content: String,
-    },
-    Mkdir {
-        path: String,
-    },
-    DeleteFile {
-        path: String,
-    },
-    DeleteFolder {
-        path: String,
-    },
-    ReadLog {
-        filename: String,
-    },
-    ReadFile {
-        path: String,
-        #[serde(default)]
-        offset_lines: usize,
-    },
-    ListDir {
-        path: String,
-    },
-    Grep {
-        pattern: String,
-        path: String,
-        #[serde(default = "default_context_lines")]
-        context_lines: usize,
-        #[serde(default)]
-        file_glob: Option<String>,
-    },
-    Glob {
-        pattern: String,
-    },
-    Edit {
-        path: String,
-        old_string: String,
-        new_string: String,
-    },
-    AskUser {
-        question: String,
-        #[serde(default)]
-        hint: Option<String>,
-    },
-    TodoWrite {
-        todos: Vec<TodoItem>,
-    },
-    MultiEdit {
-        path: String,
-        edits: Vec<EditPair>,
-    },
-    WebFetch {
-        url: String,
-
-[出力が長すぎるため一部を省略しました]
-
-[残り 5 件の結果を省略（合計文字数制限）。次のターンで続きを確認してください]
+        tokio::select! {
+            result = run_agent(&mut session, &root, &task, verbose, auto_confirm, debug, &mut checkpoints, &session_store, resume) => {
+                match result {
+                    Ok(true)  => println!("\n{GREEN_BOLD}✓ タスク完了{RESET}"),
+                    // #2: MaxTurns 時の確認メ
+...[225 文字以降省略]
 ---PROMPT END---
-[SESSION] read_files=4 done_log=28
-  read: src/agent/session_store.rs, src/command.rs, src/lib.rs, src/main.rs
-  done: ✓ ReadFile(src/executor/checkpoints.rs) → ✓ ReadFile(src/executor/context.rs) → ✓ ReadFile(src/executor/tools/glob.rs) → ✓ ReadFile(src/executor/tools/grep.rs) → ✓ ReadFile(src/executor/tools/edit.rs)
-[TIMING] 39.81s
----
+[SESSION] read_files=1 done_log=4
+  read: (なし)
+  done: ✓ Glob(src/**/*.rs) → ✓ Grep(fn main in src) → ✓ ReadFile(src/main.rs) → ✓ ReadFile(src/main.rs@150)

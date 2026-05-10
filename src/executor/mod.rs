@@ -7,8 +7,6 @@ pub mod pre_hooks;
 pub mod safety;
 pub(crate) mod tools;
 
-pub use errors::{blocked_by_hook, is_error_output, perm_denied, tool_error};
-
 pub use checkpoints::CheckpointManager;
 pub use context::ToolContext;
 

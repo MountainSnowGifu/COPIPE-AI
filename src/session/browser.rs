@@ -2,12 +2,14 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("空きポートが見つかりません")
+pub fn free_port() -> anyhow::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| anyhow::anyhow!("空きポートが見つかりません: {}", e))?;
+    let port = listener
         .local_addr()
-        .unwrap()
-        .port()
+        .map_err(|e| anyhow::anyhow!("local_addr の取得に失敗しました: {}", e))?
+        .port();
+    Ok(port)
 }
 
 fn browser_candidates() -> Vec<PathBuf> {

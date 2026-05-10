@@ -67,7 +67,13 @@ impl SessionStore {
         };
 
         if let Ok(json) = serde_json::to_string_pretty(&data) {
-            std::fs::write(&self.session_path, json).ok();
+            if let Err(e) = std::fs::write(&self.session_path, &json) {
+                eprintln!(
+                    "[WARN] セッションの保存に失敗しました ({}): {}",
+                    self.session_path.display(),
+                    e
+                );
+            }
         }
     }
 

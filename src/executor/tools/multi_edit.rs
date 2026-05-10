@@ -49,6 +49,11 @@ pub fn handle(ctx: &mut ToolContext<'_>, path: &str, edits: &[EditPair]) -> Tool
         Ok(s) => s,
     };
 
+    // CRLF → LF に正規化（Windows で CRLF 保存されたファイルへの対応）
+    // AI の old_string は JSON \n エスケープ由来で常に LF のみのため、
+    // CRLF ファイルでも old_string がマッチするよう正規化する
+    let original = original.replace("\r\n", "\n");
+
     // ─── 検証フェーズ ────────────────────────────────────────────────────────
     // 実際に適用しながら検証（後続の置換への干渉も検出）
     let mut working = original.clone();

@@ -4,7 +4,6 @@
 /// 各ターンの送信プロンプト全文・処理時間・レートリミッタ状態・セッション状態を記録する。
 use crate::executor::{LOG_DIR, now_timestamp, safe_append_log};
 use std::collections::HashSet;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -154,6 +153,7 @@ impl DebugLogger {
     }
 
     /// エラーを記録
+    #[allow(dead_code)]
     pub fn log_error(&self, err: &str) {
         if !self.enabled {
             return;
@@ -161,6 +161,7 @@ impl DebugLogger {
         self.write(&format!("[ERROR] {err}\n"));
     }
 
+    #[allow(dead_code)]
     pub fn enabled(&self) -> bool {
         self.enabled
     }

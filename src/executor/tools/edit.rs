@@ -55,6 +55,9 @@ pub fn handle(
         Ok(s) => s,
     };
 
+    // CRLF → LF に正規化（AI の old_string は JSON \n 由来で LF のみのため）
+    let content = content.replace("\r\n", "\n");
+
     // 出現回数をカウント
     let count = content.matches(old_string).count();
 
@@ -118,8 +121,6 @@ fn find_similar_lines<'a>(content: &'a str, old_string: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     fn content_after_edit(src: &str, old: &str, new: &str) -> Option<String> {
         if src.matches(old).count() == 1 {
             Some(src.replacen(old, new, 1))

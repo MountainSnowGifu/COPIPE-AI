@@ -18,12 +18,13 @@ pub(crate) use dom::{
 
 // ─── ユーティリティ ───────────────────────────────────────────────────────────
 
-/// base_ms ± spread_ms/2 のランダムな待機時間を返す（疑似乱数）
+/// base_ms ± spread_ms/2 のランダムな待機時間を返す
 fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
+    // subsec_nanos は同ミリ秒内で同値になる問題があるため as_nanos() 全体を使う
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0) as u64;
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     Duration::from_millis(base_ms + seed % spread_ms.max(1))
 }
 
@@ -78,7 +79,7 @@ impl Drop for CopilotSession {
 impl CopilotSession {
     pub async fn start() -> anyhow::Result<Self> {
         println!("[1/3] ブラウザを起動中...");
-        let port = free_port();
+        let port = free_port()?;
         let mut edge = launch_edge(port)?;
         let result = Self::init(port, &mut edge).await;
         match result {
@@ -151,84 +152,23 @@ impl CopilotSession {
         tokio::time::sleep(jitter(700, 500)).await;
 
         // Bézier 曲線軌跡でマウスを入力欄に移動してクリック
-        page.evaluate_expression(r#"
-            (function() {
-                const el = document.querySelector('#userInput');
-                if (!el) return;
-                const r = el.getBoundingClientRect();
-                const tx = r.left + r.width  * (0.35 + Math.random() * 0.3);
-                const ty = r.top  + r.height * (0.35 + Math.random() * 0.3);
-                // 現在のマウス位置の推定（画面中央付近 + ノイズ）
-                const sx = window.innerWidth  * (0.3 + Math.random() * 0.4);
-                const sy = window.innerHeight * (0.3 + Math.random() * 0.4);
-                // Bézier 制御点（軌跡に自然な弧を作る）
-                const cx = sx + (tx - sx) * (0.3 + Math.random() * 0.4) + (Math.random() - 0.5) * 120;
-                const cy = sy + (ty - sy) * (0.3 + Math.random() * 0.4) + (Math.random() - 0.5) * 80;
-                const steps = 12 + Math.floor(Math.random() * 8);
-                for (let i = 0; i <= steps; i++) {
-                    const t = i / steps;
-                    const u = 1 - t;
-                    const mx = u*u*sx + 2*u*t*cx + t*t*tx;
-                    const my = u*u*sy + 2*u*t*cy + t*t*ty;
-                    el.dispatchEvent(new MouseEvent('mousemove', {bubbles:true, clientX:mx, clientY:my}));
-                }
-                const mo = {bubbles:true, cancelable:true, clientX:tx, clientY:ty, button:0};
-                el.dispatchEvent(new MouseEvent('mousedown', mo));
-                el.dispatchEvent(new MouseEvent('mouseup',   mo));
-                el.dispatchEvent(new MouseEvent('click',     mo));
-                el.focus();
-            })()
-        "#).await?;
+        page.evaluate_expression(include_str!("js/move_and_click.js"))
+            .await?;
         tokio::time::sleep(jitter(600, 400)).await;
 
         // テキスト入力: React setter を主軸にしつつ追加イベントで React state を確実に更新
         let js_str = serde_json::to_string(prompt)?;
         page.evaluate_expression(&format!(
-            r#"
-            (function() {{
-                const el = document.querySelector('#userInput');
-                if (!el) return 'not found';
-                // React の native value setter で値をセット（React state が確実に更新される）
-                const nativeSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                nativeSetter.call(el, {js_str});
-                // React が検知するイベントを順に発火
-                el.dispatchEvent(new Event('input',  {{bubbles: true, composed: true}}));
-                el.dispatchEvent(new Event('change', {{bubbles: true, composed: true}}));
-                // InputEvent も発火（より詳細な変更通知）
-                try {{
-                    el.dispatchEvent(new InputEvent('input', {{
-                        bubbles: true, composed: true,
-                        inputType: 'insertText',
-                        data: 'x'
-                    }}));
-                }} catch(_) {{}}
-                return 'react_setter_ok';
-            }})()
-        "#
+            "({})({})",
+            include_str!("js/react_set_value.js"),
+            js_str
         ))
         .await?;
         tokio::time::sleep(jitter(900, 700)).await;
 
         // Enter キー（Shift/Alt/Ctrl なし、より自然なイベントオブジェクト）
-        page.evaluate_expression(
-            r#"
-            (function() {
-                const el = document.querySelector('#userInput');
-                if (!el) return;
-                const base = {
-                    key:'Enter', code:'Enter', keyCode:13, which:13, charCode:0,
-                    bubbles:true, cancelable:true, composed:true,
-                    shiftKey:false, altKey:false, ctrlKey:false, metaKey:false
-                };
-                el.dispatchEvent(new KeyboardEvent('keydown',  base));
-                el.dispatchEvent(new KeyboardEvent('keypress', {...base, charCode:13}));
-                el.dispatchEvent(new KeyboardEvent('keyup',    base));
-            })()
-        "#,
-        )
-        .await?;
+        page.evaluate_expression(include_str!("js/send_enter.js"))
+            .await?;
         tokio::time::sleep(jitter(400, 250)).await;
 
         // 入力欄がまだ空でなければ送信ボタンをフォールバッククリック（二重送信防止）
@@ -293,14 +233,17 @@ impl CopilotSession {
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false)
                 {
-                    use std::io::Write as IoWrite;
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&log_path)
-                    {
-                        let _ = writeln!(f, "[送信フォールバック] {click_result}\n---");
-                    }
+                    let msg = format!("[送信フォールバック] {click_result}\n---");
+                    tokio::task::spawn_blocking(move || {
+                        use std::io::Write as IoWrite;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&log_path)
+                        {
+                            let _ = writeln!(f, "{msg}");
+                        }
+                    });
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -315,12 +258,7 @@ impl CopilotSession {
         )
         .await;
         // 応答受信後の「読み返し」自然遅延（bot 検知回避）
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0) as u64;
-        let read_delay = 1_500 + seed % 2_000; // 1.5〜3.5秒
-        tokio::time::sleep(Duration::from_millis(read_delay)).await;
+        tokio::time::sleep(jitter(1_500, 2_000)).await;
         Ok(())
     }
 
