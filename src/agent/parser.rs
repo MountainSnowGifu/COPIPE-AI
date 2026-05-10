@@ -24,7 +24,7 @@ pub(super) const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
   delete_file: path
   cmd:       name, cmd(配列), timeout(必須・秒数)
   txt:       content
-  read_log:  filename(cmd_log/ai_log/ai_readonly)
+  read_log:  filename(cmd_log/ai_log/browser_log)
   bot:       message
 JSONの後に文章を続けず、コードブロック(```json ... ```)で出力してください。"#;
 

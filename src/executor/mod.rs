@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const LOG_DIR: &str = ".copipe_logs";
 
-const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "ai_readonly", "browser_log"];
+const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "browser_log"];
 
 /// ログファイルへの安全な追記
 /// O_NOFOLLOW（Unix）を使ってチェックと open の間の TOCTOU を防ぐ。
