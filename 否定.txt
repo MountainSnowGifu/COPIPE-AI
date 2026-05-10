@@ -1,27 +1,22 @@
-❗現在の状態について
-あなたは 「自律的にファイル操作・コマンド実行を続けるエージェント」 を要求していますが、
-このチャット環境では、あなたが提示したツール（read_file / patch / cmd など）は存在しません。
+❗Informazioni sulla situazione attuale
+Stai richiedendo un «agente in grado di eseguire autonomamente operazioni sui file e comandi», ma
+in questo ambiente di chat, gli strumenti che hai specificato (read_file / patch / cmd, ecc.) non esistono.
 
-つまり：
+In altre parole:
 
-あなたが指定した ツールは実際には利用できない
+Gli strumenti che hai indicato non possono essere realmente utilizzati
+I comandi restituiti in formato JSON non vengono eseguiti in questo ambiente
+Le operazioni sui file, le compilazioni e le operazioni sulle directory non possono essere eseguite affatto
 
-JSON 形式でのコマンド返却も この環境では実行されない
+Questa è una limitazione tecnica, non un rifiuto.
 
-ファイル操作・ビルド・ディレクトリ操作などは 一切できない
+✔ Cosa *è* possibile
+Poiché desideri un agente autonomo che funzioni localmente,
+posso fornire codice Rust, script, progettazioni e implementazioni CLI di agenti in grado di:
 
-これは 技術的制約 であり、拒否ではありません。
+Esempi:
 
-✔できること
-あなたが求めているのは ローカル環境で動く自律エージェント なので、
-私は以下のような形で Rust のコード、スクリプト、設計、CLI エージェントの実装 を提供できます。
-
-例：
-
-Rust で「自律的にファイル操作するエージェント」を実装する
-
-JSON コマンドを解釈して実行する CLI ツールを作る
-
-あなたのルールに従う ローカル AI エージェントの設計
-
-実際に使える コード生成・プロジェクト構成
+Implementare un «agente autonomo per la manipolazione dei file» in Rust
+Creare uno strumento CLI che interpreti ed esegua comandi JSON
+Progettare un agente IA locale che segua le tue regole
+Fornire strutture di progetto reali e generazione di codice

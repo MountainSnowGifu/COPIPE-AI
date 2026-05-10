@@ -97,7 +97,7 @@ pub(super) async fn wait_for_ai_message_count(
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!();
-            anyhow::bail!("Copilot が応答しませんでした。しばらく待ってから再実行してください");
+            anyhow::bail!("Copilot が応答しませんでした。しばらく待ってから同じタスクを再入力してください");
         }
         if tokio::time::Instant::now() >= check_block_at {
             check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -124,8 +124,8 @@ pub(super) async fn wait_for_ai_message_count(
                 .unwrap_or_else(|| "{}".to_string());
             write_diag_log(log_dir, &format!("[診断] {input_state}"));
             if let Some(reason) = detect_copilot_block(page).await {
-                eprintln!("\n応答が停止しました。再実行してください");
-                anyhow::bail!("Copilot との接続が切れました（{reason}）。再実行してください");
+                eprintln!("\n応答が停止しました。同じタスクを再入力してください");
+                anyhow::bail!("Copilot との接続が切れました（{reason}）。同じタスクを再入力してください");
             }
         }
         let secs = start.elapsed().as_secs();
@@ -148,9 +148,9 @@ pub(super) async fn wait_for_stable_text(
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(10);
 
-    const POLL_MS: u64 = 800;
-    const STABLE_NEEDED: u64 = 5; // 800ms × 5 = 4秒安定を要求
-    const SETTLE_MS: u64 = 1_500; // 安定確認後の追加バッファ
+    const POLL_MS: u64 = 600;
+    const STABLE_NEEDED: u64 = 3; // 600ms × 3 = 1.8秒安定を要求
+    const SETTLE_MS: u64 = 800;   // 安定確認後の追加バッファ
 
     loop {
         tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
@@ -158,7 +158,7 @@ pub(super) async fn wait_for_stable_text(
 
         if !text.is_empty() && text == last {
             stable += 1;
-            eprint!("\r安定確認中 {stable}/{STABLE_NEEDED} ({} 文字)          ", text.len());
+            eprint!("\r  応答受信中...          ");
             std::io::stderr().flush().ok();
             if stable >= STABLE_NEEDED {
                 tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
@@ -170,7 +170,10 @@ pub(super) async fn wait_for_stable_text(
             std::io::stderr().flush().ok();
             stable = 0;
             last = text;
-            scroll_to_nth_ai_message(page, n).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                scroll_to_nth_ai_message(page, n),
+            ).await;
         }
 
         // アイドルマウス動作（生成中も自然な操作感を維持）
@@ -188,7 +191,7 @@ pub(super) async fn wait_for_stable_text(
             if !last.is_empty() {
                 return Ok(last);
             }
-            anyhow::bail!("Copilot の応答が途中で止まりました。再実行してください");
+            anyhow::bail!("Copilot の応答が途中で止まりました。同じタスクを再入力してください");
         }
 
         if tokio::time::Instant::now() >= check_block_at {
@@ -201,7 +204,7 @@ pub(super) async fn wait_for_stable_text(
                     let warned = format!("{last}\n\n⚠ Copilot がレート制限/ブロックを報告しました（{reason}）。応答が途中の可能性があります。");
                     return Ok(warned);
                 }
-                anyhow::bail!("Copilot との接続が切れました（{reason}）。再実行してください");
+                anyhow::bail!("Copilot との接続が切れました（{reason}）。同じタスクを再入力してください");
             }
         }
     }

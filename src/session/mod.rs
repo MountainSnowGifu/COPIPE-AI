@@ -12,7 +12,7 @@ use std::process::Child;
 use std::time::Duration;
 use watchdog::{wait_for_ai_message_count, wait_for_stable_text};
 
-pub(crate) use dom::{ai_message_count, get_codeblocks_from_dom, page_diagnostic};
+pub(crate) use dom::{ai_message_count, get_codeblocks_from_dom, page_diagnostic, read_nth_ai_text};
 
 // ─── ユーティリティ ───────────────────────────────────────────────────────────
 
@@ -27,7 +27,7 @@ fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
 
 // ─── プロンプト分割 ───────────────────────────────────────────────────────────
 
-const PROMPT_CHUNK_SIZE: usize = 10_000;
+const PROMPT_CHUNK_SIZE: usize = 30_000;
 
 fn split_prompt(text: &str) -> Vec<String> {
     if text.len() <= PROMPT_CHUNK_SIZE {
@@ -286,8 +286,17 @@ impl CopilotSession {
         let log_dir_ref = self.log_dir.as_deref();
         wait_for_ai_message_count(page, target, 90, log_dir_ref).await?;
         wait_for_stable_text(page, target, 90, log_dir_ref).await?;
-        scroll_to_nth_ai_message(page, target).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            scroll_to_nth_ai_message(page, target),
+        ).await;
+        // 応答受信後の「読み返し」自然遅延（bot 検知回避）
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0) as u64;
+        let read_delay = 1_500 + seed % 2_000; // 1.5〜3.5秒
+        tokio::time::sleep(Duration::from_millis(read_delay)).await;
         Ok(())
     }
 

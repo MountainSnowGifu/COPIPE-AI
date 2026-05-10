@@ -4,20 +4,27 @@ mod command;
 mod executor;
 mod session;
 
-use agent::{build_system_prompt, run_agent};
+use agent::{build_system_prompt, run_agent, SessionStore};
+use agent::debug_log::DebugLogger;
+use executor::CheckpointManager;
+use executor::tools;
 use color::{use_unicode, BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW};
 use executor::LOG_DIR;
 use session::CopilotSession;
 
 // #6: セクション分けされたヘルプ + #9: Ctrl+C 明記
-fn print_help(verbose: bool, auto_confirm: bool) {
+fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
     let v_state = if verbose      { "ON " } else { "OFF" };
     let y_state = if auto_confirm { "ON " } else { "OFF" };
+    let d_state = if debug        { "ON " } else { "OFF" };
 
     println!("{BOLD}── コマンド ─────────────────────────────────{RESET}");
     println!("  {BOLD}:h{RESET}       このヘルプを表示");
     println!("  {BOLD}:v{RESET}       verboseモード切替      (現在: {BOLD}{v_state}{RESET})");
+    println!("  {BOLD}:d{RESET}       デバッグログ切替       (現在: {BOLD}{d_state}{RESET})  → .copipe_logs/debug_log");
     println!("  {BOLD}:y{RESET}       自動確認モード切替     (現在: {BOLD}{y_state}{RESET})");
+    println!("  {BOLD}:undo{RESET}    直前のファイル変更を元に戻す");
+    println!("  {BOLD}:undo list{RESET} チェックポイント一覧を表示");
     println!("  {BOLD}exit{RESET}     終了  (Ctrl+D でも可)");
     println!();
     println!("{BOLD}── タスクの書き方 ───────────────────────────{RESET}");
@@ -49,10 +56,12 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let mut auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
+    // デバッグログはデフォルト ON（--no-debug で無効化）
+    let mut debug = !args.iter().any(|a| a == "--no-debug");
     let root_dir = args.iter().find(|a| !a.starts_with('-')).cloned();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        print_help(verbose, auto_confirm);
+        print_help(verbose, auto_confirm, debug);
         return Ok(());
     }
 
@@ -84,6 +93,10 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(&log_path, "").ok();
     }
 
+    // チェックポイントマネージャとセッションストアを初期化
+    let mut checkpoints = CheckpointManager::new(&root);
+    let session_store = SessionStore::new(&root);
+
     // #1: 進捗は session/mod.rs の start() 内で出力
     let mut session = CopilotSession::start().await?;
     session.log_dir = Some(log_dir.clone());
@@ -106,13 +119,28 @@ async fn main() -> anyhow::Result<()> {
     {
         let v_state = if verbose      { format!("{BOLD}ON{RESET}")  } else { format!("{DIM}OFF{RESET}") };
         let y_state = if auto_confirm { format!("{BOLD}ON{RESET}")  } else { format!("{DIM}OFF{RESET}") };
-        println!("モード: 詳細ログ={v_state}  自動確認={y_state}  {DIM}(切替: :v / :y){RESET}");
+        let d_state = if debug        { format!("{BOLD}ON{RESET}")  } else { format!("{DIM}OFF{RESET}") };
+        println!("モード: 詳細ログ={v_state}  自動確認={y_state}  デバッグ={d_state}  {DIM}(切替: :v / :y / :d){RESET}");
+        if debug {
+            println!("{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・状態を記録します{RESET}");
+        }
     }
     println!("{DIM}ヘルプは :h  Ctrl+C でキャンセル  終了は exit または Ctrl+D{RESET}");
 
     // #8: 初回起動時のみログディレクトリを案内
     if is_first_run {
         println!("{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log){RESET}", log_dir.display());
+    }
+
+    // 前回セッションが残っていれば案内（ただし即座に復元はしない — タスク入力時に判断）
+    if session_store.exists() {
+        if let Some(ref prev) = session_store.load() {
+            println!(
+                "{YELLOW}前回の未完了セッションがあります: 「{}」（{}ターン完了済み / {}）{RESET}",
+                prev.user_task, prev.turn_count, prev.saved_at
+            );
+            println!("{DIM}同じタスクを入力すると続きから再開します。別のタスクを入力すると新規開始します。{RESET}");
+        }
     }
 
     let mut rl = rustyline::DefaultEditor::new()?;
@@ -125,12 +153,15 @@ async fn main() -> anyhow::Result<()> {
 
     'repl: loop {
         // ── 入力フェーズ（行末 \ でマルチライン継続） ──────────────────
-        // #2: プロンプトにモード状態を表示
-        let base_prompt = match (auto_confirm, verbose) {
-            (true,  true)  => "\n[自動確認,詳細]> ",
-            (true,  false) => "\n[自動確認]> ",
-            (false, true)  => "\n[詳細]> ",
-            (false, false) => "\n> ",
+        // #7: Worktree 使用中かチェックしてプロンプトに反映
+        let in_worktree = executor::tools::worktree::load_state(&root).is_some();
+        let base_prompt: &str = &{
+            let mut tags: Vec<&str> = Vec::new();
+            if in_worktree   { tags.push("worktree"); }
+            if auto_confirm  { tags.push("自動確認"); }
+            if verbose       { tags.push("詳細"); }
+            if tags.is_empty() { "\n> ".to_string() }
+            else { format!("\n[{}]> ", tags.join(",")) }
         };
         let mut task = String::new();
         loop {
@@ -169,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
         }
         match task.as_str() {
             "exit" | "quit" => break,
-            ":h" => { print_help(verbose, auto_confirm); continue 'repl; }
+            ":h" => { print_help(verbose, auto_confirm, debug); continue 'repl; }
             ":v" => {
                 verbose = !verbose;
                 println!("詳細ログ: {BOLD}{}{RESET}", if verbose { "ON" } else { "OFF" });
@@ -178,6 +209,41 @@ async fn main() -> anyhow::Result<()> {
             ":y" => {
                 auto_confirm = !auto_confirm;
                 println!("自動確認: {BOLD}{}{RESET}", if auto_confirm { "ON" } else { "OFF" });
+                continue 'repl;
+            }
+            ":d" | ":debug" => {
+                debug = !debug;
+                println!("デバッグ: {BOLD}{}{RESET}", if debug { "ON (.copipe_logs/debug_log へ記録)" } else { "OFF" });
+                continue 'repl;
+            }
+            ":undo list" => {
+                let list = checkpoints.list();
+                if list.is_empty() {
+                    println!("{DIM}チェックポイントはありません{RESET}");
+                } else {
+                    println!("{BOLD}── チェックポイント（新しい順、:undo / :undo 0 / :undo 1 ...）──{RESET}");
+                    for (i, (path, op)) in list.iter().enumerate() {
+                        println!("  {DIM}[{i}]{RESET} ↩ {path} ({op})");
+                    }
+                }
+                continue 'repl;
+            }
+            cmd if cmd == ":undo" || cmd.starts_with(":undo ") => {
+                // :undo → 最新1件、:undo N → N番目を復元
+                let idx: Option<usize> = cmd.strip_prefix(":undo ").and_then(|s| s.trim().parse().ok());
+                let result = if let Some(n) = idx {
+                    checkpoints.undo_at(n)
+                } else {
+                    checkpoints.undo()
+                };
+                match result {
+                    Ok(Some((path, op))) =>
+                        println!("{GREEN_BOLD}✓{RESET} 復元しました: {path} ({op})"),
+                    Ok(None) =>
+                        println!("{YELLOW}チェックポイントがありません{RESET}"),
+                    Err(e) =>
+                        println!("{RED_BOLD}復元失敗: {e}{RESET}"),
+                }
                 continue 'repl;
             }
             _ => {}
@@ -226,12 +292,22 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── 実行フェーズ（Ctrl+C でキャンセル） ───────────────────────
+        // 前回セッションがあり、タスクが同じなら自動復元
+        let resume = session_store.load().filter(|s| s.user_task == task);
+        if resume.is_some() {
+            println!("{DIM}前回の続きから再開します...{RESET}");
+        }
         tokio::select! {
-            result = run_agent(&mut session, &root, &task, verbose) => {
+            result = run_agent(&mut session, &root, &task, verbose, auto_confirm, debug, &mut checkpoints, &session_store, resume) => {
                 match result {
                     Ok(true)  => println!("\n{GREEN_BOLD}✓ タスク完了{RESET}"),
-                    Ok(false) => {}
-                    Err(e)    => println!("\n{RED_BOLD}エラー: {e}{RESET}"),
+                    // #2: MaxTurns 時の確認メッセージ（runner.rs の詳細メッセージの後に簡潔に）
+                    Ok(false) => println!("{DIM}（同じタスクを再入力すると続きから再開します）{RESET}"),
+                    Err(e)    => {
+                        // #3: エラー時にタスク文字列を表示して再入力を楽にする
+                        println!("\n{RED_BOLD}エラー: {e}{RESET}");
+                        println!("{DIM}タスク: {task}{RESET}");
+                    }
                 }
             }
             _ = tokio::signal::ctrl_c() => {

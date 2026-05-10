@@ -13,8 +13,9 @@ pub(super) const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
 ]
 ```
 使えるtypeの一覧:
-  read_file / list_dir / file / patch / mkdir / delete_file
-  cmd / txt / read_log / bot / error
+  read_file / list_dir / grep / glob / file / edit / patch / mkdir / delete_file
+  cmd / txt / read_log / ask_user / todo_write / multi_edit / web_fetch
+  enter_worktree / exit_worktree / bot / error
 必須フィールド:
   read_file: path  ※ offset_lines(省略可) で続きを読める
   list_dir:  path

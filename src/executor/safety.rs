@@ -41,12 +41,12 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     let exe = cmd.first().ok_or_else(|| "cmd が空です".to_string())?;
 
     if exe.starts_with('/') {
-        return Err(format!("アクセス拒否: 絶対パス '{exe}' での実行は禁止です"));
+        return Err(format!("Permission denied: 絶対パス '{exe}' での実行は禁止です"));
     }
     // 相対パス付き実行（./cargo, tools/git など）は basename allowlist を迂回できるため拒否
     if exe.contains('/') || exe.contains('\\') {
         return Err(format!(
-            "アクセス拒否: パス区切りを含む '{exe}' は禁止です。コマンド名のみを指定してください"
+            "Permission denied: パス区切りを含む '{exe}' は禁止です。コマンド名のみを指定してください"
         ));
     }
 
@@ -55,7 +55,7 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     // allowlist: 許可リストにないコマンドはすべて拒否
     if !ALLOWED_EXECUTABLES.contains(&basename) {
         return Err(format!(
-            "アクセス拒否: '{basename}' は許可されていません。許可コマンド: {}",
+            "Permission denied: '{basename}' は許可されていません。許可コマンド: {}",
             ALLOWED_EXECUTABLES.join(", ")
         ));
     }
@@ -63,10 +63,10 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     // 引数チェック: 絶対パス・`..` を拒否
     for arg in &cmd[1..] {
         if arg.starts_with('/') {
-            return Err(format!("アクセス拒否: 引数 '{arg}' に絶対パスが含まれています"));
+            return Err(format!("Permission denied: 引数 '{arg}' に絶対パスが含まれています"));
         }
         if arg.contains("..") {
-            return Err(format!("アクセス拒否: 引数 '{arg}' に '..' が含まれています"));
+            return Err(format!("Permission denied: 引数 '{arg}' に '..' が含まれています"));
         }
     }
 
@@ -75,7 +75,7 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
         let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
         if !ALLOWED_GIT_SUBCMDS.contains(&subcmd) {
             return Err(format!(
-                "アクセス拒否: 'git {subcmd}' は許可されていません。許可サブコマンド: {}",
+                "Permission denied: 'git {subcmd}' は許可されていません。許可サブコマンド: {}",
                 ALLOWED_GIT_SUBCMDS.join(", ")
             ));
         }
@@ -86,12 +86,12 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
         let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
         if BLOCKED_CARGO_SUBCMDS.contains(&subcmd) {
             return Err(format!(
-                "アクセス拒否: 'cargo {subcmd}' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です"
+                "Permission denied: 'cargo {subcmd}' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です"
             ));
         }
         if !ALLOWED_CARGO_SUBCMDS.contains(&subcmd) {
             return Err(format!(
-                "アクセス拒否: 'cargo {subcmd}' は許可されていません。許可サブコマンド: {}",
+                "Permission denied: 'cargo {subcmd}' は許可されていません。許可サブコマンド: {}",
                 ALLOWED_CARGO_SUBCMDS.join(", ")
             ));
         }
@@ -103,7 +103,7 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
         for arg in &cmd[1..] {
             if arg.contains('$') || arg.contains('`') || arg.contains(';') {
                 return Err(format!(
-                    "アクセス拒否: '{basename}' の引数にシェル特殊文字が含まれています: '{arg}'"
+                    "Permission denied: '{basename}' の引数にシェル特殊文字が含まれています: '{arg}'"
                 ));
             }
         }
@@ -115,7 +115,7 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
             for arg in &cmd[1..] {
                 if blocked.contains(&arg.as_str()) {
                     return Err(format!(
-                        "アクセス拒否: '{basename} {arg}' は危険なため禁止です"
+                        "Permission denied: '{basename} {arg}' は危険なため禁止です"
                     ));
                 }
             }
