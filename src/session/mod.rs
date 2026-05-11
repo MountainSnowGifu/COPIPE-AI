@@ -9,7 +9,7 @@ use chromiumoxide::browser::Browser;
 use dom::{scroll_to_nth_ai_message, scroll_to_selector};
 use futures::StreamExt;
 use input::INPUT_SELECTOR;
-use page::{get_ws_url, prepare_copilot_page, wait_for_input};
+use page::{dismiss_signin_later_safe, get_ws_url, prepare_copilot_page, wait_for_input};
 use std::process::Child;
 use std::time::Duration;
 use watchdog::{wait_for_ai_message_count, wait_for_stable_text};
@@ -149,6 +149,7 @@ impl CopilotSession {
         let page = &self.page;
         let baseline = ai_message_count(page).await?;
 
+        dismiss_signin_later_safe(page).await;
         wait_for_input(page, 10).await?;
         scroll_to_selector(page, INPUT_SELECTOR).await;
         tokio::time::sleep(jitter(700, 500)).await;

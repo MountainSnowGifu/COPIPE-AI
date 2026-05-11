@@ -12,6 +12,14 @@ use std::time::Duration;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
 const ACCEPT_LANGUAGE: &str = "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7";
 
+fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    Duration::from_millis(base_ms + seed % spread_ms.max(1))
+}
+
 const ANTI_BOT_JS: &str = r#"
 window.__copipeFindInput = function() {
     const selectors = [
@@ -276,6 +284,8 @@ pub(super) async fn wait_for_input(
     let mut last_report = 0u64;
 
     loop {
+        dismiss_signin_later_safe(page).await;
+
         let js = format!(
             r#"
             (() => {{
@@ -306,6 +316,104 @@ pub(super) async fn wait_for_input(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+#[allow(dead_code, unreachable_code)]
+pub(super) async fn dismiss_signin_later(page: &chromiumoxide::Page) -> bool {
+    return dismiss_signin_later_safe(page).await;
+
+    let visible = page
+        .evaluate_expression(
+            r#"
+            (() => {
+                const labels = ["後で", "Later", "Not now", "Skip for now"];
+                const visible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === "hidden" || style.display === "none") return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 4 && r.height > 4;
+                };
+                const textOf = (el) => (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                return [...document.querySelectorAll('button, [role="button"], a, [tabindex]:not([tabindex="-1"]), div, span')]
+                    .some((el) => visible(el) && labels.some((label) => {
+                        const text = textOf(el);
+                        const isInteractive = el.matches('button, [role="button"], a, [tabindex]:not([tabindex="-1"])');
+                        if (!(text === label || (isInteractive && text.includes(label)))) return false;
+                        if (!isInteractive && text.length > 40) return false;
+                        const modalText = textOf(el.closest('[role="dialog"], [aria-modal="true"], main, body'));
+                        return modalText.includes("Microsoft で続行") ||
+                            modalText.includes("Apple で続行") ||
+                            modalText.includes("Google で続行") ||
+                            modalText.toLowerCase().includes("sign in");
+                    }));
+            })()
+            "#,
+        )
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    if !visible {
+        return false;
+    }
+
+    tokio::time::sleep(jitter(650, 850)).await;
+    page.evaluate_expression(include_str!("js/dismiss_signin_later.js"))
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+        .is_some()
+}
+
+pub(super) async fn dismiss_signin_later_safe(page: &chromiumoxide::Page) -> bool {
+    let visible = page
+        .evaluate_expression(
+            r#"
+            (() => {
+                const labels = ["\u5f8c\u3067", "Later", "Not now", "Skip for now"];
+                const providerLabels = [
+                    "Microsoft \u3067\u7d9a\u884c",
+                    "Apple \u3067\u7d9a\u884c",
+                    "Google \u3067\u7d9a\u884c",
+                ];
+                const visible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === "hidden" || style.display === "none") return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 4 && r.height > 4;
+                };
+                const textOf = (el) => (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                return [...document.querySelectorAll('button, [role="button"], a, [tabindex]:not([tabindex="-1"]), div, span')]
+                    .some((el) => visible(el) && labels.some((label) => {
+                        const text = textOf(el);
+                        const isInteractive = el.matches('button, [role="button"], a, [tabindex]:not([tabindex="-1"])');
+                        if (!(text === label || (isInteractive && text.includes(label)))) return false;
+                        if (!isInteractive && text.length > 40) return false;
+                        const modalText = textOf(el.closest('[role="dialog"], [aria-modal="true"], main, body'));
+                        return providerLabels.some((providerLabel) => modalText.includes(providerLabel)) ||
+                            modalText.toLowerCase().includes("sign in");
+                    }));
+            })()
+            "#,
+        )
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    if !visible {
+        return false;
+    }
+
+    tokio::time::sleep(jitter(650, 850)).await;
+    page.evaluate_expression(include_str!("js/dismiss_signin_later.js"))
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+        .is_some()
 }
 
 pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<chromiumoxide::Page> {
@@ -363,6 +471,7 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
     }
     print!("\r                                   \r");
     std::io::stdout().flush().ok();
+    dismiss_signin_later_safe(&page).await;
 
     // 入力欄を待機。見つからない場合は BOT チャレンジを確認してユーザーに回復を促す
     if let Err(_) = wait_for_input(&page, 20).await {

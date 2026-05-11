@@ -24,10 +24,7 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
         return match ctx.resolve(pattern) {
             Err(e) => ToolResult::new(format!("Glob({pattern})"), format!("ERROR: {e}")),
             Ok(path) if path.exists() => {
-                let display = path
-                    .strip_prefix(ctx.root)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| path.display().to_string());
+                let display = display_path(&path, ctx.root);
                 ToolResult::new(
                     format!("Glob({pattern})"),
                     format!("{display}\n\n[1 ファイル]"),
@@ -80,11 +77,7 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
 
     let lines: Vec<String> = results[..shown]
         .iter()
-        .filter_map(|p| {
-            p.strip_prefix(ctx.root)
-                .ok()
-                .map(|r| r.display().to_string())
-        })
+        .map(|p| display_path(p, ctx.root))
         .collect();
 
     let mut output = lines.join("\n");
@@ -233,6 +226,15 @@ fn is_inside_root(path: &Path, root: &Path) -> bool {
     canon_path.starts_with(canon_root)
 }
 
+fn display_path(path: &Path, root: &Path) -> String {
+    let rel = path.strip_prefix(root).ok().or_else(|| {
+        root.canonicalize()
+            .ok()
+            .and_then(|canon_root| path.strip_prefix(canon_root).ok())
+    });
+    rel.unwrap_or(path).display().to_string().replace('\\', "/")
+}
+
 // ─── テスト ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -307,5 +309,21 @@ mod tests {
                 || result.output.contains(r"src\agent\mod.rs")
         );
         assert!(!result.output.contains("readme.md"));
+    }
+
+    #[test]
+    fn test_handle_outputs_forward_slashes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+        std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+
+        let mut read_files = std::collections::HashSet::new();
+        let mut checkpoints = crate::executor::CheckpointManager::new(dir.path());
+        let ctx = crate::executor::ToolContext::new(dir.path(), &mut read_files, &mut checkpoints);
+
+        let result = handle(&ctx, r"src\**\*.rs");
+
+        assert!(result.output.contains("src/agent/mod.rs"));
+        assert!(!result.output.contains(r"src\agent\mod.rs"));
     }
 }
