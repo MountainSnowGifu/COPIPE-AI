@@ -2,7 +2,7 @@ use crate::executor::context::ToolContext;
 use crate::executor::tools::todo_write;
 use crate::executor::{ALLOWED_LOGS, LOG_DIR, ToolResult};
 
-pub fn handle(ctx: &ToolContext<'_>, filename: &str) -> ToolResult {
+pub fn handle(ctx: &ToolContext<'_>, filename: &str, offset_lines: usize) -> ToolResult {
     const MAX_LOG_BYTES: usize = 32 * 1024;
     let output = if !ALLOWED_LOGS.contains(&filename) {
         format!(
@@ -15,7 +15,7 @@ pub fn handle(ctx: &ToolContext<'_>, filename: &str) -> ToolResult {
         if todos.is_empty() {
             "(タスクリストは空です)".to_string()
         } else {
-            todo_write::format_todos(&todos)
+            todo_write::format_todos_plain(&todos)
         }
     } else {
         let log_path = ctx.root.join(LOG_DIR).join(filename);
@@ -36,7 +36,23 @@ pub fn handle(ctx: &ToolContext<'_>, filename: &str) -> ToolResult {
                     } else {
                         ""
                     };
-                    format!("{prefix}{}", String::from_utf8_lossy(slice))
+                    let full_text = format!("{prefix}{}", String::from_utf8_lossy(slice));
+                    // offset_lines が指定されていればその行数だけスキップする
+                    if offset_lines > 0 {
+                        let total_lines = full_text.lines().count();
+                        let skipped: String = full_text
+                            .lines()
+                            .skip(offset_lines)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if skipped.is_empty() {
+                            format!("[{offset_lines} 行目以降は存在しません（全 {total_lines} 行）]")
+                        } else {
+                            skipped
+                        }
+                    } else {
+                        full_text
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     "(ログファイルが存在しません)".to_string()
@@ -44,6 +60,13 @@ pub fn handle(ctx: &ToolContext<'_>, filename: &str) -> ToolResult {
                 Err(e) => crate::executor::errors::tool_error(&e),
             }
         }
-    }; // ← else if filename == "todo" の else ブランチを閉じる
-    ToolResult::new(format!("ReadLog({filename})"), output)
+    };
+    ToolResult::new(
+        if offset_lines > 0 {
+            format!("ReadLog({filename}@{offset_lines})")
+        } else {
+            format!("ReadLog({filename})")
+        },
+        output,
+    )
 }

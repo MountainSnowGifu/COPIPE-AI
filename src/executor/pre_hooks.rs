@@ -84,7 +84,7 @@ fn hook_log_action(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
         AiCommand::DeleteFile { path } => format!("{path} (削除)"),
         AiCommand::Mkdir { path } => format!("{path} (作成)"),
         AiCommand::Cmd { cmd, .. } => cmd.join(" "),
-        AiCommand::ReadLog { filename } => filename.clone(),
+        AiCommand::ReadLog { filename, .. } => filename.clone(),
         AiCommand::AskUser { question, .. } => format!("質問: {question}"),
         _ => return PreHookOutcome::Continue,
     };

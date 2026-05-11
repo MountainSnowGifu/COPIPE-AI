@@ -25,7 +25,7 @@ pub fn run(tool_name: &str, result: ToolResult) -> ToolResult {
 /// format_tool_results の「合計」制限とは別に「1件あたり」を制限する
 fn hook_limit_output(tool_name: &str, mut result: ToolResult) -> ToolResult {
     let limit = match tool_name {
-        "cmd" => 6_000,      // cargo build 等は stdout/stderr が巨大になりやすい
+        "cmd" => 8_000,      // cargo build 等は stdout/stderr が巨大になりやすい
         "read_log" => 8_000, // ログは末尾 32KB 読むが念のため
         _ => 12_000,         // その他（read_file はバジェット管理で既に制限済み）
     };
@@ -38,12 +38,42 @@ fn hook_limit_output(tool_name: &str, mut result: ToolResult) -> ToolResult {
             .map(|i| i + 1)
             .unwrap_or(truncated.len());
         let kept = &truncated[..safe_end];
-        result.output = format!(
-            "{kept}\n[出力が長すぎるため省略しました。{} 文字以降を切り捨て]",
-            limit
-        );
+        let continuation = if tool_name == "cmd" {
+            "\n続きの出力は次で確認できます:\n```json\n{\"type\":\"read_log\",\"filename\":\"cmd_log\"}\n```".to_string()
+        } else if tool_name == "read_log" {
+            // label 例: "ReadLog(cmd_log)" or "ReadLog(cmd_log@50)"
+            let next_hint = read_log_continuation_hint(&result.label, kept);
+            format!("\n{next_hint}")
+        } else {
+            String::new()
+        };
+        result.output =
+            format!("{kept}\n[出力が {limit} 文字を超えたため省略しました]{continuation}");
     }
     result
+}
+
+/// ReadLog の label から filename と現在の offset を取り出し、次の継続ヒントを生成する
+fn read_log_continuation_hint(label: &str, kept: &str) -> String {
+    // label: "ReadLog(cmd_log)" or "ReadLog(cmd_log@50)"
+    let inner = label
+        .strip_prefix("ReadLog(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or("");
+    let (filename, base_offset) = match inner.rsplit_once('@') {
+        Some((f, off)) if off.chars().all(|c| c.is_ascii_digit()) => {
+            (f, off.parse::<usize>().unwrap_or(0))
+        }
+        _ => (inner, 0),
+    };
+    if filename.is_empty() {
+        return String::new();
+    }
+    let shown_lines = kept.lines().count();
+    let next_offset = base_offset + shown_lines;
+    format!(
+        "続きは次で確認できます:\n```json\n{{\"type\":\"read_log\",\"filename\":\"{filename}\",\"offset_lines\":{next_offset}}}\n```"
+    )
 }
 
 /// OS エラー文 "(os error N)" を人間・AI 向けのメッセージに書き換える
@@ -120,5 +150,33 @@ mod tests {
             assert!(!result.output.contains(&home));
             assert!(result.output.contains("~/secret/file.txt"));
         }
+    }
+
+    #[test]
+    fn test_read_log_truncation_adds_continuation_hint() {
+        let long = "line\n".repeat(3_000); // 5*3000=15000 chars > 8000 limit
+        let mut result = ToolResult::new("ReadLog(cmd_log)", long.as_str());
+        result.label = "ReadLog(cmd_log)".to_string();
+        let result = run("read_log", result);
+        assert!(result.output.contains("省略しました"));
+        assert!(result.output.contains("\"type\":\"read_log\""));
+        assert!(result.output.contains("\"filename\":\"cmd_log\""));
+        assert!(result.output.contains("\"offset_lines\":"));
+    }
+
+    #[test]
+    fn test_read_log_offset_continuation_hint_accumulates() {
+        // offset 50 から読み始めた ReadLog が切り詰められた場合、次の offset は 50+shown になる
+        let long = "line\n".repeat(3_000);
+        let mut result = ToolResult::new("ReadLog(cmd_log@50)", long.as_str());
+        result.label = "ReadLog(cmd_log@50)".to_string();
+        let result = run("read_log", result);
+        let offset: usize = result.output
+            .split("\"offset_lines\":")
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .expect("offset_lines が含まれるべき");
+        assert!(offset > 50, "offset は base(50) + shown_lines より大きいはず");
     }
 }

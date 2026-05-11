@@ -12,8 +12,8 @@ use std::path::Path;
 /// ファイル名が明示されている場合、AI は glob を省略して直接 read_file へ進める。
 pub(super) fn task_mentions_explicit_filename(task: &str) -> bool {
     const KNOWN_EXTS: &[&str] = &[
-        "md", "txt", "rs", "toml", "json", "yaml", "yml", "py", "js", "ts", "c", "cpp", "h",
-        "html", "css", "sh",
+        "md", "txt", "rs", "toml", "json", "yaml", "yml", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "h",
+        "html", "css", "sh", "hs", "lhs", "cabal",
     ];
     task.split_whitespace().any(|word| {
         let w = word.trim_matches(|c: char| "「」。、！？()[]{}\"'".contains(c));
@@ -41,7 +41,17 @@ pub(super) fn is_short_open_ended_development_task(task: &str) -> bool {
     }
 
     let development_markers = [
-        "実装", "追加", "拡張", "改善", "修正", "対応", "作成", "リファクタ", "IR", "API", "UI",
+        "実装",
+        "追加",
+        "拡張",
+        "改善",
+        "修正",
+        "対応",
+        "作成",
+        "リファクタ",
+        "IR",
+        "API",
+        "UI",
     ];
     development_markers
         .iter()
@@ -79,6 +89,30 @@ pub(super) fn is_non_actionable_ack(task: &str) -> bool {
     )
 }
 
+/// resume なしでは対象が分からない「中身を入れて」系の短い依頼を検出する。
+pub(super) fn is_ambiguous_file_fill_request(task: &str) -> bool {
+    let trimmed = task.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > 32
+        || task_mentions_explicit_filename(trimmed)
+    {
+        return false;
+    }
+
+    [
+        "中身をいれて",
+        "中身を入れて",
+        "内容をいれて",
+        "内容を入れて",
+        "本文をいれて",
+        "本文を入れて",
+        "原文をいれて",
+        "原文を入れて",
+    ]
+    .iter()
+    .any(|phrase| trimmed.contains(phrase))
+}
+
 /// 数字のみ、または "1. codegen" 形式のメニュー選択（文脈なし）を検出する。
 pub(super) fn is_menu_selection_without_context(task: &str) -> bool {
     let normalized = task.trim().trim_matches(|c: char| {
@@ -96,8 +130,8 @@ pub(super) fn is_menu_selection_without_context(task: &str) -> bool {
         return false;
     };
     let rest = parts.collect::<Vec<_>>().join(" ");
-    let first =
-        first.trim_end_matches(|c: char| c.is_ascii_punctuation() || matches!(c, '。' | '、' | '．'));
+    let first = first
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || matches!(c, '。' | '、' | '．'));
 
     first.chars().all(|c| c.is_ascii_digit())
         && !rest.is_empty()
@@ -117,7 +151,10 @@ pub(super) fn should_short_circuit_non_actionable_task(
     task: &str,
     resume: Option<&SessionData>,
 ) -> bool {
-    resume.is_none() && (is_non_actionable_ack(task) || is_menu_selection_without_context(task))
+    resume.is_none()
+        && (is_non_actionable_ack(task)
+            || is_menu_selection_without_context(task)
+            || is_ambiguous_file_fill_request(task))
 }
 
 /// "読みましたか？" のような既読確認質問を検出する（実際の読み込み作業とは区別）。
@@ -172,8 +209,14 @@ pub(super) fn task_requires_file_update(task: &str) -> bool {
         || task.contains("日本語")
         || task.contains("更新")
         || task.contains("修正")
-        || task.contains("変換");
+        || task.contains("変換")
+        || task.contains("分割");
     has_file_like_target && asks_update
+}
+
+/// ファイル本文を複数ファイルへ分ける依頼か判定する。
+pub(super) fn task_requires_file_split(task: &str) -> bool {
+    task_requires_file_update(task) && task.contains("分割")
 }
 
 /// 実装・追加・修正など実際の開発アクションを要求するタスクか判定する。
@@ -264,6 +307,51 @@ pub(super) fn is_deferring_development_message(message: &str) -> bool {
     (asks_user_to_choose || mentions_work_without_doing) && !reports_finished_work
 }
 
+/// 作業後の最終応答が、未完了の「次の選択肢」提示で終わっているかを検出する。
+pub(super) fn is_incomplete_handoff_message(message: &str) -> bool {
+    let m = message.trim();
+    if m.chars().count() < 80 {
+        return false;
+    }
+
+    let asks_next_choice = [
+        "次に選べる作業",
+        "次の選択肢",
+        "選択を教えて",
+        "選んでください",
+        "どれか一つ",
+        "次に進める",
+        "次に進める方針",
+    ]
+    .iter()
+    .any(|p| m.contains(*p));
+
+    let mentions_unfinished_work = [
+        "プレースホルダ",
+        "原文を",
+        "挿入",
+        "完了する",
+        "作業が完了",
+        "次に",
+        "残り",
+        "追加の",
+    ]
+    .iter()
+    .any(|p| m.contains(*p));
+
+    let reports_verified_completion = [
+        "cargo check",
+        "ビルド",
+        "テスト",
+        "確認済み",
+        "完了しました",
+    ]
+    .iter()
+    .any(|p| m.contains(*p));
+
+    asks_next_choice && mentions_unfinished_work && !reports_verified_completion
+}
+
 /// 「次に返します」のような段取り説明だけでレビュー本文が欠けているメッセージを検出する。
 pub(super) fn is_placeholder_review_message(message: &str) -> bool {
     let m = message.trim();
@@ -300,6 +388,28 @@ pub(super) fn is_placeholder_review_message(message: &str) -> bool {
     ];
     let concrete_hits = concrete_markers.iter().filter(|p| m.contains(**p)).count();
     placeholder_hits >= 2 && concrete_hits < 3
+}
+
+/// `bot` の最終回答がテンプレートの仮文のままか判定する。
+pub(super) fn is_placeholder_bot_message(message: &str) -> bool {
+    let m = message.trim();
+    if m.is_empty() {
+        return true;
+    }
+
+    let normalized = m.trim_matches(|c: char| {
+        c.is_ascii_punctuation()
+            || c.is_whitespace()
+            || matches!(
+                c,
+                '（' | '）' | '(' | ')' | '「' | '」' | '『' | '』' | '。' | '、'
+            )
+    });
+
+    matches!(
+        normalized,
+        "完全な回答" | "完全な回答をここに" | "ここにレビュー本文" | "現状と選択肢"
+    ) || (m.contains("（完全な回答") && m.chars().count() <= 40)
 }
 
 /// bot のメッセージに現在のプロジェクトに存在しないパスが含まれていれば列挙する。

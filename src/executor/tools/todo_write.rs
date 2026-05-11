@@ -54,9 +54,15 @@ pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
 
     // フォーマットして表示（ターミナル + ツール結果）
     let formatted = format_todos(todos);
+    let guidance = todo_guidance(todos);
     println!("\n{formatted}");
 
-    ToolResult::new("TodoWrite", format!("OK\n\n{formatted}"))
+    let output = if guidance.is_empty() {
+        format!("OK\n\n{formatted}")
+    } else {
+        format!("OK\n\n{formatted}\n\n{guidance}")
+    };
+    ToolResult::new("TodoWrite", output)
 }
 
 /// todo リストをターミナル向けにフォーマットする
@@ -94,6 +100,66 @@ pub fn format_todos(todos: &[TodoItem]) -> String {
         "──────────────────────────────────────────────\n  完了:{completed}  進行中:{in_prog}  未着手:{pending}"
     ));
     lines.join("\n")
+}
+
+/// プロンプトやログ向けに ANSI エスケープなしで todo を整形する
+pub fn format_todos_plain(todos: &[TodoItem]) -> String {
+    if todos.is_empty() {
+        return "(タスクリストは空です)".to_string();
+    }
+
+    let mut lines = Vec::new();
+    for item in todos {
+        let status = match item.status {
+            TodoStatus::Completed => "completed",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Pending => "pending",
+        };
+        lines.push(format!("- [{}] {status}: {}", item.id, item.content));
+    }
+
+    let pending = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::Pending)
+        .count();
+    let in_prog = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::InProgress)
+        .count();
+    let completed = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
+    lines.push(format!(
+        "summary: completed={completed}, in_progress={in_prog}, pending={pending}"
+    ));
+    lines.join("\n")
+}
+
+pub fn unfinished(todos: &[TodoItem]) -> Vec<&TodoItem> {
+    todos
+        .iter()
+        .filter(|t| t.status != TodoStatus::Completed)
+        .collect()
+}
+
+fn todo_guidance(todos: &[TodoItem]) -> String {
+    let unfinished = unfinished(todos);
+    if unfinished.is_empty() {
+        return String::new();
+    }
+
+    let in_progress = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::InProgress)
+        .count();
+    if in_progress == 0 {
+        "[TODO guidance] 未完了タスクがあります。次に実行する1件を in_progress にしてから、そのタスクを実行してください。".to_string()
+    } else if in_progress > 1 {
+        "[TODO guidance] in_progress が複数あります。並列ではなく順番に進める場合は、現在実行する1件だけを in_progress にしてください。".to_string()
+    } else {
+        "[TODO guidance] in_progress のタスクを実行し、完了したら todo_write で completed に更新してください。".to_string()
+    }
 }
 
 /// todo.json を読み込んで Vec<TodoItem> を返す（存在しない場合は空）
@@ -141,6 +207,29 @@ mod tests {
         assert!(out.contains("完了:1"));
         assert!(out.contains("進行中:1"));
         assert!(out.contains("未着手:1"));
+    }
+
+    #[test]
+    fn test_format_todos_plain_has_no_ansi() {
+        let todos = make_todos();
+        let out = format_todos_plain(&todos);
+        assert!(out.contains("[1] completed: executor 分割"));
+        assert!(out.contains("[2] in_progress: hooks 追加"));
+        assert!(out.contains("summary: completed=1, in_progress=1, pending=1"));
+        assert!(!out.contains("\x1b["));
+    }
+
+    #[test]
+    fn test_todo_guidance_warns_when_no_in_progress() {
+        let todos = vec![TodoItem {
+            id: "1".into(),
+            content: "調査".into(),
+            status: TodoStatus::Pending,
+        }];
+
+        let guidance = todo_guidance(&todos);
+
+        assert!(guidance.contains("in_progress"));
     }
 
     #[test]

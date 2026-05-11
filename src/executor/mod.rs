@@ -295,10 +295,14 @@ pub async fn execute(
                 tools::patch::handle(&mut ctx, path, diff)
             ),
 
-            AiCommand::ReadLog { filename } => dispatch!(
+            AiCommand::ReadLog { filename, offset_lines } => dispatch!(
                 "read_log",
-                format!("ReadLog({filename})"),
-                tools::read_log::handle(&ctx, filename)
+                if *offset_lines > 0 {
+                    format!("ReadLog({filename}@{offset_lines})")
+                } else {
+                    format!("ReadLog({filename})")
+                },
+                tools::read_log::handle(&ctx, filename, *offset_lines)
             ),
 
             AiCommand::Cmd {
@@ -412,7 +416,10 @@ fn truncate_tool_entry(entry: &str, max_chars: usize) -> String {
     }
 }
 
-fn read_file_continuation_hint_for_truncated_entry(entry: &str, max_chars: usize) -> Option<String> {
+fn read_file_continuation_hint_for_truncated_entry(
+    entry: &str,
+    max_chars: usize,
+) -> Option<String> {
     let (path, base_offset) = read_file_label_from_entry(entry)?;
     let head: String = entry.chars().take(max_chars).collect();
     let code_start = head.find("```\n")? + 4;

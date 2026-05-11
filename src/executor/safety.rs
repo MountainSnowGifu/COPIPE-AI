@@ -4,6 +4,10 @@
 pub const ALLOWED_EXECUTABLES: &[&str] = &[
     // Rust toolchain（サブコマンドは ALLOWED_CARGO_SUBCMDS で制限）
     "cargo", "rustc", "rustfmt",
+    // Haskell toolchain（cabal/stack はサブコマンドを制限。runghc/runhaskell はスクリプト直接実行のため除外）
+    "ghc", "ghc-pkg", "cabal", "stack", "hlint", "hoogle",
+    // Node.js / TypeScript toolchain（node/npx はスクリプト直接実行のため除外。npm はサブコマンドを制限）
+    "tsc", "eslint", "prettier", "npm",
     // バージョン管理（読み取り系のみ。書き込み系は ALLOWED_GIT_SUBCMDS で制限）
     "git", // ファイル閲覧・検索（書き込みなし）
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
@@ -40,6 +44,27 @@ const ALLOWED_CARGO_SUBCMDS: &[&str] = &["build", "check", "fmt", "clippy", "doc
 
 /// cargo で明示的に拒否するサブコマンド（任意コード実行の恐れ）
 const BLOCKED_CARGO_SUBCMDS: &[&str] = &["run", "test", "bench", "fix", "install", "publish"];
+
+/// cabal で許可するサブコマンド
+/// run / test / bench / exec は任意コードを実行するため除外。
+const ALLOWED_CABAL_SUBCMDS: &[&str] = &["build", "check", "clean", "haddock", "sdist", "info", "list", "freeze"];
+
+/// cabal で明示的に拒否するサブコマンド（任意コード実行の恐れ）
+const BLOCKED_CABAL_SUBCMDS: &[&str] = &["run", "test", "bench", "exec", "install", "upload", "publish"];
+
+/// stack で許可するサブコマンド
+/// run / test / exec / script / ghci はバイナリ・テストコードを実行するため除外。
+const ALLOWED_STACK_SUBCMDS: &[&str] = &["build", "clean", "haddock", "sdist", "ls", "query", "path", "dot", "ide"];
+
+/// stack で明示的に拒否するサブコマンド（任意コード実行の恐れ）
+const BLOCKED_STACK_SUBCMDS: &[&str] = &["run", "test", "bench", "exec", "ghci", "repl", "script", "install", "upload", "publish"];
+
+/// npm で許可するサブコマンド
+/// run / exec / start / test はpackage.jsonの任意スクリプトを実行するため除外。
+const ALLOWED_NPM_SUBCMDS: &[&str] = &["install", "ci", "list", "ls", "audit", "outdated", "view", "info", "show", "pack"];
+
+/// npm で明示的に拒否するサブコマンド（任意コード実行の恐れ）
+const BLOCKED_NPM_SUBCMDS: &[&str] = &["run", "exec", "start", "test", "publish", "init", "link", "unlink"];
 
 /// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
 const BLOCKED_ARGS: &[(&str, &[&str])] = &[("find", &["-delete", "-exec", "-execdir"])];
@@ -104,6 +129,57 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
             return Err(format!(
                 "Permission denied: 'cargo {subcmd}' は許可されていません。許可サブコマンド: {}",
                 ALLOWED_CARGO_SUBCMDS.join(", ")
+            ));
+        }
+    }
+
+    // cabal はサブコマンドを制限
+    if basename == "cabal" {
+        let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
+        if BLOCKED_CABAL_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "Permission denied: 'cabal {subcmd}' は任意コードを実行できるため禁止です。許可サブコマンド: {}",
+                ALLOWED_CABAL_SUBCMDS.join(", ")
+            ));
+        }
+        if !ALLOWED_CABAL_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "Permission denied: 'cabal {subcmd}' は許可されていません。許可サブコマンド: {}",
+                ALLOWED_CABAL_SUBCMDS.join(", ")
+            ));
+        }
+    }
+
+    // stack はサブコマンドを制限
+    if basename == "stack" {
+        let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
+        if BLOCKED_STACK_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "Permission denied: 'stack {subcmd}' は任意コードを実行できるため禁止です。許可サブコマンド: {}",
+                ALLOWED_STACK_SUBCMDS.join(", ")
+            ));
+        }
+        if !ALLOWED_STACK_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "Permission denied: 'stack {subcmd}' は許可されていません。許可サブコマンド: {}",
+                ALLOWED_STACK_SUBCMDS.join(", ")
+            ));
+        }
+    }
+
+    // npm はサブコマンドを制限（package.json の任意スクリプト実行を防ぐ）
+    if basename == "npm" {
+        let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
+        if BLOCKED_NPM_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "Permission denied: 'npm {subcmd}' は任意コードを実行できるため禁止です。許可サブコマンド: {}",
+                ALLOWED_NPM_SUBCMDS.join(", ")
+            ));
+        }
+        if !ALLOWED_NPM_SUBCMDS.contains(&subcmd) {
+            return Err(format!(
+                "Permission denied: 'npm {subcmd}' は許可されていません。許可サブコマンド: {}",
+                ALLOWED_NPM_SUBCMDS.join(", ")
             ));
         }
     }

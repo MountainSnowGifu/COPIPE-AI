@@ -5,12 +5,13 @@ use super::parser::{SCHEMA_HINT, parse_blocks};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{SessionData, SessionStore};
 use super::task::{
-    is_deferring_development_message, is_menu_selection_without_context, is_non_actionable_ack,
-    is_placeholder_review_message, is_read_status_question, is_short_open_ended_development_task,
-    looks_like_project_path, missing_referenced_project_paths,
+    is_ambiguous_file_fill_request, is_deferring_development_message,
+    is_incomplete_handoff_message, is_menu_selection_without_context, is_non_actionable_ack,
+    is_placeholder_bot_message, is_placeholder_review_message,
+    is_short_open_ended_development_task, missing_referenced_project_paths,
     should_short_circuit_non_actionable_task, should_short_circuit_read_status_task,
-    task_mentions_explicit_filename, task_requires_development_action, task_requires_file_update,
-    task_requires_review_output,
+    task_mentions_explicit_filename, task_requires_development_action, task_requires_file_split,
+    task_requires_file_update, task_requires_review_output,
 };
 use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET, YELLOW};
 use crate::command::AiCommand;
@@ -131,24 +132,208 @@ enum TurnOutcome {
     MaxTurns,
 }
 
-/// ターン終了時の状態を判定して TurnOutcome を返す
-fn determine_outcome(
-    user_task: &str,
-    bot_message: Option<&str>,
+/// ターン終了時の評価に必要な入力状態（core-internals.md §「run()の1ターン」参照）
+struct TurnState<'a> {
+    user_task: &'a str,
+    bot_message: Option<&'a str>,
     is_done: bool,
     only_txt: bool,
-    tool_results: &[ToolResult],
+    tool_results: &'a [ToolResult],
     turn: u32,
-    ctx: &str,
+    ctx: &'a str,
     consecutive_txt: u32,
-    read_files: &HashSet<PathBuf>,
-    root: &Path,
+    read_files: &'a HashSet<PathBuf>,
+    done_log: &'a [String],
+    root: &'a Path,
     has_successful_file_update: bool,
     consecutive_read_file: u32,
     consecutive_ask_user: u32,
     consecutive_edit_fail: u32,
-    last_failed_edit_path: &str,
+    last_failed_edit_path: &'a str,
+}
+
+/// エージェントループの連続操作カウンター（core-internals.md §state参照）
+struct LoopCounters {
+    consecutive_txt: u32,
+    consecutive_read_file: u32,
+    consecutive_ask_user: u32,
+    consecutive_edit_fail: u32,
+    last_failed_edit_path: String,
+}
+
+impl LoopCounters {
+    fn new() -> Self {
+        Self {
+            consecutive_txt: 0,
+            consecutive_read_file: 0,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: String::new(),
+        }
+    }
+
+    /// コマンド実行後に各カウンターを更新する
+    fn update(&mut self, commands: &[AiCommand], tool_results: &[ToolResult]) {
+        // read_file 連打カウント更新
+        // Txt コマンドが混在しても read_file があれば加算する（以前は all() のため Txt 混在で誤リセットされていた）
+        // Glob / ListDir は「構造探索」であり作業進捗とは見なさない（Grep は対象検索なので進捗扱い）
+        let read_file_count = commands
+            .iter()
+            .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
+            .count() as u32;
+        let has_progress = commands.iter().any(|c| {
+            matches!(
+                c,
+                AiCommand::Grep { .. }
+                    | AiCommand::Bot { .. }
+                    | AiCommand::File { .. }
+                    | AiCommand::Edit { .. }
+                    | AiCommand::MultiEdit { .. }
+                    | AiCommand::Patch { .. }
+                    | AiCommand::Cmd { .. }
+            )
+        });
+        if read_file_count > 0 && !has_progress {
+            self.consecutive_read_file += read_file_count;
+        } else {
+            self.consecutive_read_file = 0;
+        }
+
+        // ask_user 連打カウント更新
+        if commands
+            .iter()
+            .any(|c| matches!(c, AiCommand::AskUser { .. }))
+        {
+            self.consecutive_ask_user += 1;
+        } else {
+            self.consecutive_ask_user = 0;
+        }
+
+        // edit 連続失敗カウント更新
+        // 直近の done_log エントリで同一ファイルへの edit が失敗し続けているか確認
+        {
+            let failed_edit_path = tool_results
+                .iter()
+                .filter(|r| {
+                    crate::executor::errors::is_error_output(&r.output)
+                        && (r.label.starts_with("Edit(") || r.label.starts_with("MultiEdit("))
+                })
+                .filter_map(|r| {
+                    r.label
+                        .trim_start_matches("Edit(")
+                        .trim_start_matches("MultiEdit(")
+                        .strip_suffix(')')
+                        .map(|s| s.to_string())
+                })
+                .next();
+            if let Some(path) = failed_edit_path {
+                if path == self.last_failed_edit_path {
+                    self.consecutive_edit_fail += 1;
+                } else {
+                    self.consecutive_edit_fail = 1;
+                    self.last_failed_edit_path = path;
+                }
+            } else if commands
+                .iter()
+                .any(|c| matches!(c, AiCommand::Edit { .. } | AiCommand::MultiEdit { .. }))
+            {
+                // edit コマンドが成功した場合はリセット
+                self.consecutive_edit_fail = 0;
+                self.last_failed_edit_path.clear();
+            }
+        }
+    }
+}
+
+/// SPEC core-internals.md §「hooks.runStop()」相当:
+/// `TurnOutcome::Done` が返った際に完了条件を検証し、条件未達なら `NudgeForJson` に変換する。
+/// Done 以外の outcome はそのまま返す（フックは Done のときだけ評価する）。
+fn apply_stop_hooks(
+    outcome: TurnOutcome,
+    user_task: &str,
+    ctx: &str,
+    done_log: &[String],
+    is_rust_project: bool,
+    has_successful_file_update: bool,
+    root: &Path,
 ) -> TurnOutcome {
+    if !matches!(outcome, TurnOutcome::Done) {
+        return outcome;
+    }
+
+    // フック 1: 未完了 todo があれば続ける
+    // SPEC tools-overview.md §「TodoWrite」— セッション内タスクリストの pending 検出
+    let todos = todo_write::load(root);
+    let unfinished_todos = todo_write::unfinished(&todos);
+    if !unfinished_todos.is_empty() {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ todo_write に未完了タスクが残っています]\n\
+                完了報告の前に、TODO.JSON の未完了タスクを実行してください。\
+                `read_log todo` だけで止まらず、in_progress があればそのタスクを実行し、\
+                完了したら `todo_write` で completed に更新してください。\n\n\
+                [現在の TODO.JSON]\n{}\n\n\
+                ```json\n[{{\"type\":\"txt\",\"content\":\"TODO.JSON の in_progress タスクを実行します\"}},{{\"type\":\"read_log\",\"filename\":\"todo\"}}]\n```",
+                todo_write::format_todos_plain(&todos)
+            ),
+        };
+    }
+
+    // フック 2: Rust プロジェクトでファイル編集後のコンパイル確認
+    // SPEC claudeSpec.md §「動作の流れ: 確認する」— 変更後の検証ステップ
+    if is_rust_project && has_successful_file_update && task_requires_development_action(user_task)
+    {
+        // done_log に cmd 実行の痕跡があれば検証済みとみなす
+        let has_cmd_verification = done_log.iter().any(|e| e.contains(" Cmd("));
+        if !has_cmd_verification {
+            return TurnOutcome::NudgeForJson {
+                prompt: format!(
+                    "{ctx}\n\n\
+                    [⚠ ファイルを変更しましたが、コンパイル確認がまだ実行されていません]\n\
+                    Rust プロジェクトの変更後は `cargo check` でコンパイルを確認してから完了報告してください。\n\
+                    ```json\n\
+                    [{{\"type\":\"txt\",\"content\":\"変更後のコンパイルを確認します\"}},\
+                    {{\"type\":\"cmd\",\"name\":\"コンパイル確認\",\"cmd\":[\"cargo\",\"check\"],\"workdir\":\".\",\"timeout\":60}}]\n\
+                    ```"
+                ),
+            };
+        }
+    }
+
+    outcome
+}
+
+/// ターン終了時の状態を判定して TurnOutcome を返す
+fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
+    let user_task = state.user_task;
+    let bot_message = state.bot_message;
+    let is_done = state.is_done;
+    let only_txt = state.only_txt;
+    let tool_results = state.tool_results;
+    let turn = state.turn;
+    let ctx = state.ctx;
+    let consecutive_txt = state.consecutive_txt;
+    let read_files = state.read_files;
+    let done_log = state.done_log;
+    let root = state.root;
+    let has_successful_file_update = state.has_successful_file_update;
+    let consecutive_read_file = state.consecutive_read_file;
+    let consecutive_ask_user = state.consecutive_ask_user;
+    let consecutive_edit_fail = state.consecutive_edit_fail;
+    let last_failed_edit_path = state.last_failed_edit_path;
+    if is_done && bot_message.map(is_placeholder_bot_message).unwrap_or(true) {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ 最終回答がテンプレートの仮文です]\n\
+                `（完全な回答）` のようなプレースホルダで完了にしないでください。\
+                ユーザーにそのまま見せられる具体的な完了報告、または必要な次アクションを `bot` の message に入れてください。\n\
+                ```json\n{{\"type\":\"bot\",\"message\":\"（ここに具体的な回答本文を省略せず書く）\"}}\n```"
+            ),
+        };
+    }
+
     if is_done && let Some(message) = bot_message {
         let missing_paths = missing_referenced_project_paths(message, root);
         if !missing_paths.is_empty() {
@@ -169,7 +354,7 @@ fn determine_outcome(
 
     if is_done && task_requires_review_output(user_task) {
         if bot_message
-            .map(is_placeholder_review_message)
+            .map(|m| is_placeholder_review_message(m))
             .unwrap_or(true)
         {
             return TurnOutcome::NudgeForJson {
@@ -199,6 +384,25 @@ fn determine_outcome(
                 ログ内のファイル名や crate 名は現在の事実として扱わないでください。\
                 必要なら `glob` / `grep` で対象を絞り、実装後に `cargo check` してください。\n\
                 ```json\n{{\"type\":\"glob\",\"pattern\":\"src/**/*.rs\"}}\n```"
+            ),
+        };
+    }
+
+    if is_done
+        && task_requires_development_action(user_task)
+        && has_successful_file_update
+        && bot_message
+            .map(is_incomplete_handoff_message)
+            .unwrap_or(false)
+    {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ 作業後のつなぎが未完了メニューになっています]\n\
+                ファイル変更後に「次の選択肢を選んでください」で終了しないでください。\
+                ユーザーの依頼と現在のツール結果から明らかな残作業があるなら、ask_user ではなく続けて実行してください。\
+                残作業が本質的に判断不能なら、選択式メニューではなく、実施済み内容・未実施内容・次に必要な具体情報を短く `bot` で報告してください。\n\
+                ```json\n{{\"type\":\"bot\",\"message\":\"（実施済み内容と、未実施があればその理由を簡潔に報告）\"}}\n```"
             ),
         };
     }
@@ -252,6 +456,23 @@ fn determine_outcome(
                 `bot` で完了を報告してください。\n\
                 ```json\n{{\"type\":\"bot\",\"message\":\"完了しました。\"}}\
 ```"
+            ),
+        };
+    }
+
+    if consecutive_read_file >= 3
+        && !is_done
+        && unread_guard_recovery_read_paths(done_log, tool_results)
+            .is_some_and(|paths| !paths.is_empty())
+    {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [未読ガード回復の read_file が完了しています]\n\
+                直前に未読として拒否された書き込み対象を読み終えています。\
+                この read_file 群は安全確認のために必要なものなので、grep や追加調査へ逸れず、\
+                失敗した file / edit / patch コマンドを現在の内容に合わせて再試行してください。\n\
+                ```json\n{{\"type\":\"file\",\"path\":\"対象ファイル\",\"content\":\"（読み込み済み内容を踏まえた更新後の全文）\"}}\n```"
             ),
         };
     }
@@ -391,13 +612,90 @@ fn recovery_hint_for_tool_results(tool_results: &[ToolResult]) -> String {
         String::new()
     };
 
-    format!("{missing_path_hint}{blocked_cargo_hint}{parent_dir_hint}")
+    let unread_guard_paths: Vec<String> = tool_results
+        .iter()
+        .filter(|r| r.output.contains("このタスク内で未読です"))
+        .filter_map(|r| label_inner(&r.label).map(str::to_string))
+        .collect();
+    let unread_guard_hint = if unread_guard_paths.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n[未読ファイルへの書き込みが拒否されました]\n\
+            対象パス: {}\n\
+            これは安全確認のための拒否です。対象ファイルを同じ JSON 配列内でまとめて `read_file` し、\
+            読み終えたら grep や追加質問に逸れず、同じ書き込みを現在の内容に合わせて再試行してください。",
+            unread_guard_paths.join(", ")
+        )
+    };
+
+    format!("{missing_path_hint}{blocked_cargo_hint}{parent_dir_hint}{unread_guard_hint}")
 }
 
 fn label_inner(label: &str) -> Option<&str> {
     label
         .find('(')
         .and_then(|start| label.strip_suffix(')').map(|s| &s[start + 1..]))
+}
+
+fn unread_guard_recovery_read_paths(
+    done_log: &[String],
+    tool_results: &[ToolResult],
+) -> Option<Vec<String>> {
+    if tool_results.is_empty()
+        || !tool_results
+            .iter()
+            .all(|r| r.label.starts_with("ReadFile(") && !is_error_output(&r.output))
+    {
+        return None;
+    }
+
+    let current_reads: HashSet<String> = tool_results
+        .iter()
+        .filter_map(|r| label_inner(&r.label).map(str::to_string))
+        .collect();
+    if current_reads.is_empty() {
+        return None;
+    }
+
+    let mut pending = HashSet::new();
+    let mut ready = HashSet::new();
+    for entry in done_log {
+        if entry.starts_with("✗ ")
+            && entry.contains("このタスク内で未読です")
+            && let Some(path) = done_log_label_inner(entry)
+        {
+            pending.insert(path.to_string());
+        } else if entry.starts_with("✓ ReadFile(")
+            && let Some(path) = done_log_label_inner(entry)
+            && pending.contains(path)
+        {
+            ready.insert(path.to_string());
+        } else if is_successful_write_done_log(entry)
+            && let Some(path) = done_log_label_inner(entry)
+        {
+            pending.remove(path);
+            ready.remove(path);
+        }
+    }
+
+    let mut paths: Vec<String> = ready.intersection(&current_reads).cloned().collect();
+    paths.sort();
+    Some(paths)
+}
+
+fn done_log_label_inner(entry: &str) -> Option<&str> {
+    let start = entry.find('(')?;
+    let rest = &entry[start + 1..];
+    let end = rest.find(')')?;
+    Some(&rest[..end])
+}
+
+fn is_successful_write_done_log(entry: &str) -> bool {
+    entry.starts_with("✓ WriteFile(")
+        || entry.starts_with("✓ Edit(")
+        || entry.starts_with("✓ MultiEdit(")
+        || entry.starts_with("✓ Patch(")
 }
 
 fn read_file_hint(read_files: &HashSet<PathBuf>, root: &Path) -> String {
@@ -416,13 +714,16 @@ fn read_file_hint(read_files: &HashSet<PathBuf>, root: &Path) -> String {
 }
 
 fn build_initial_prompt(user_task: &str) -> String {
-    if is_non_actionable_ack(user_task) || is_menu_selection_without_context(user_task) {
+    if is_non_actionable_ack(user_task)
+        || is_menu_selection_without_context(user_task)
+        || is_ambiguous_file_fill_request(user_task)
+    {
         return format!(
             "## New task boundary\n\
             これは新規タスクです。過去の Copilot チャット文脈や別環境のログ内容を続きとして扱わないでください。\n\n\
             [元のタスク] {user_task}\n\n\
-            依頼内容が短い相づちだけで、現在のコードベースに対する具体的な作業内容がありません。\
-            ツールを実行せず、`bot` で「具体的な作業内容を入力してください」と簡潔に返してください。"
+            依頼内容だけでは、現在のコードベースに対する具体的な作業対象が分かりません。\
+            ツールを実行せず、`bot` で「具体的な作業対象と内容を入力してください」と簡潔に返してください。"
         );
     }
 
@@ -464,7 +765,12 @@ fn build_initial_prompt(user_task: &str) -> String {
 
     let next_action_hint = if task_mentions_explicit_filename(user_task) {
         "次のアクションを必ず ```json コードブロックで返してください。\
-        依頼文にファイル名が明示されている場合は、glob を省略して直接 `read_file` でファイルを確認してください。"
+        依頼文にファイル名が明示されている場合は、glob を省略して直接 `read_file` でファイルを確認してください。\
+        複数ステップに渡る場合は `todo_write` でタスクリストを作成してから進めてください。"
+    } else if task_requires_development_action(user_task) {
+        "次のアクションを必ず ```json コードブロックで返してください。\
+        まず `glob` で現在のプロジェクト構成を把握し、`grep` で対象を絞り込んでから `read_file` してください。\
+        複数ステップに渡る作業は `todo_write` でタスクリストを作成して進捗を管理しながら進めてください。"
     } else {
         "次のアクションを必ず ```json コードブロックで返してください。\
         まだ対象ファイルが不明な場合は、まず `txt` と `glob` で現在のプロジェクト構成を確認してください。"
@@ -696,13 +1002,12 @@ pub async fn run_agent(
         (build_initial_prompt(user_task), HashSet::new(), Vec::new())
     };
 
-    let mut consecutive_txt = 0u32;
+    // Rust プロジェクト判定（ストップフックの cargo check ニュージ用）
+    let is_rust_project = root.join("Cargo.toml").exists();
+
+    let mut counters = LoopCounters::new();
     let mut parse_error_count = 0u32;
     let mut reached_max = false;
-    let mut consecutive_read_file = 0u32; // read_file 連打検知用
-    let mut consecutive_ask_user = 0u32; // ask_user 連打検知用
-    let mut consecutive_edit_fail = 0u32; // 同一ファイルへの edit 連続失敗検知用
-    let mut last_failed_edit_path = String::new(); // 直前の失敗 edit のパス
     let mut rate_limiter = RateLimiter::new();
     let mut total_turns = resume.as_ref().map(|d| d.turn_count).unwrap_or(0);
     let mut has_successful_file_update = done_log.iter().any(|s| {
@@ -784,18 +1089,28 @@ pub async fn run_agent(
             .map(|e| ToolResult::new("ParseError", e))
             .collect();
 
-        // コマンドもエラーもない → NoCommands として終了
+        // コマンドもエラーもない → リカバリ試行（最大3回、それ以降は終了）
         if commands.is_empty() && tool_results.is_empty() {
             parse_error_count += 1;
-            let hint = if parse_error_count >= 2 {
-                "\n  ヒント: タスクをより具体的に書くか、短い指示（例: list_dir src）から始めてみてください"
-            } else {
-                ""
-            };
-            println!(
-                "{YELLOW}応答からコマンドを取得できませんでした。タスクを再入力してください。{hint}{RESET}"
+            if parse_error_count >= 3 {
+                println!(
+                    "{YELLOW}応答からコマンドを取得できませんでした（3回連続）。タスクを再入力してください。{RESET}"
+                );
+                return Ok(false);
+            }
+            // JSON コードブロックを改めて要求して自律的に継続
+            eprintln!("  {DIM}[JSON 未返答 {parse_error_count}/2 — 自動リトライ中]{RESET}");
+            let ctx = build_context_header(user_task, &read_files, root, &done_log);
+            prompt = format!(
+                "{ctx}\n\n\
+                [⚠ 前のターンで JSON コードブロックが返ってきませんでした ({parse_error_count}回目)]\n\
+                次のアクションを必ず ```json コードブロックで返してください。\n\
+                タスクが完了しているなら:\n\
+                ```json\n{{\"type\":\"bot\",\"message\":\"（完了報告）\"}}\n```\n\
+                まだ作業がある場合は:\n\
+                ```json\n[{{\"type\":\"txt\",\"content\":\"次にする作業\"}},{{\"type\":\"glob\",\"pattern\":\"src/**/*.rs\"}}]\n```"
             );
-            return Ok(false);
+            continue;
         }
 
         // ── 1.5 実行前に AI の計画を表示 ──────────────────────────────────────
@@ -916,24 +1231,58 @@ pub async fn run_agent(
         // ask_user 連打の事前ブロック:
         // consecutive_ask_user >= 1 のときに ask_user を再度実行すると
         // ユーザーが複数回連続で質問を受けてしまうため、execute() の前にブロックする。
-        if consecutive_ask_user >= 1
+        if counters.consecutive_ask_user >= 1
             && !is_done
             && commands
                 .iter()
                 .any(|c| matches!(c, AiCommand::AskUser { .. }))
         {
-            consecutive_ask_user += 1;
-            consecutive_txt += 1;
+            counters.consecutive_ask_user += 1;
+            counters.consecutive_txt += 1;
             let ctx = build_context_header(user_task, &read_files, root, &done_log);
             prompt = format!(
                 "{ctx}\n\n\
-                [⚠ ask_user を連続で送っています ({consecutive_ask_user}回目)]\
+                [⚠ ask_user を連続で送っています ({}回目)]\
                 \nユーザーの回答が短い・曖昧であっても、再度 ask_user で詳細を聞き返さないでください。\
                 \n手元の情報で最善の判断をして作業を進めてください。\
                 \n判断できないなら `bot` で現状と次のステップ候補を提示してください。\
                 \n```json\
                 \n{{\"type\": \"bot\", \"message\": \"（現状と選択肢）\"}}\
-                \n```"
+                \n```",
+                counters.consecutive_ask_user
+            );
+            dbg.turn_end();
+            continue;
+        }
+
+        // ファイル分割タスクで本文を読めているのに選択肢確認だけへ流れるのを止める。
+        // 「適切に分割したい」は判断込みの依頼なので、保守的な基準を選んで実ファイル作成へ進める。
+        if task_requires_file_split(user_task)
+            && !read_files.is_empty()
+            && !is_done
+            && commands
+                .iter()
+                .any(|c| matches!(c, AiCommand::AskUser { .. }))
+            && !commands.iter().any(|c| {
+                matches!(
+                    c,
+                    AiCommand::File { .. }
+                        | AiCommand::Edit { .. }
+                        | AiCommand::MultiEdit { .. }
+                        | AiCommand::Patch { .. }
+                )
+            })
+        {
+            counters.consecutive_txt += 1;
+            let ctx = build_context_header(user_task, &read_files, root, &done_log);
+            prompt = format!(
+                "{ctx}\n\n\
+                [⚠ ファイル分割タスクを確認質問だけで止めています]\n\
+                ユーザーは「適切に分割したい」と依頼しており、本文は既に読めています。\
+                追加確認せず、本文中の実在する区切り（件名・通番・見出し・`---` など）に基づく保守的な分割方法を選び、\
+                `mkdir` と `file` で分割済みファイルを作成してください。\
+                プレースホルダや要約だけのファイルは禁止です。原文の該当本文をそのまま入れてください。\n\
+                ```json\n[{{\"type\":\"mkdir\",\"path\":\"出力ディレクトリ\"}},{{\"type\":\"file\",\"path\":\"出力ディレクトリ/01.md\",\"content\":\"（原文から抽出した本文）\"}}]\n```"
             );
             dbg.turn_end();
             continue;
@@ -966,74 +1315,7 @@ pub async fn run_agent(
         }
         tool_results.extend(exec_results);
 
-        // read_file 連打カウント更新
-        // Txt コマンドが混在しても read_file があれば加算する（以前は all() のため Txt 混在で誤リセットされていた）
-        // Glob / ListDir は「構造探索」であり作業進捗とは見なさない（Grep は対象検索なので進捗扱い）
-        let read_file_count = commands
-            .iter()
-            .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
-            .count() as u32;
-        let has_progress = commands.iter().any(|c| {
-            matches!(
-                c,
-                AiCommand::Grep { .. }
-                    | AiCommand::Bot { .. }
-                    | AiCommand::File { .. }
-                    | AiCommand::Edit { .. }
-                    | AiCommand::MultiEdit { .. }
-                    | AiCommand::Patch { .. }
-                    | AiCommand::Cmd { .. }
-            )
-        });
-        if read_file_count > 0 && !has_progress {
-            consecutive_read_file += read_file_count;
-        } else {
-            consecutive_read_file = 0;
-        }
-
-        // ask_user 連打カウント更新
-        if commands
-            .iter()
-            .any(|c| matches!(c, AiCommand::AskUser { .. }))
-        {
-            consecutive_ask_user += 1;
-        } else {
-            consecutive_ask_user = 0;
-        }
-
-        // edit 連続失敗カウント更新
-        // 直近の done_log エントリで同一ファイルへの edit が失敗し続けているか確認
-        {
-            let failed_edit_path = tool_results
-                .iter()
-                .filter(|r| {
-                    crate::executor::errors::is_error_output(&r.output)
-                        && (r.label.starts_with("Edit(") || r.label.starts_with("MultiEdit("))
-                })
-                .filter_map(|r| {
-                    r.label
-                        .trim_start_matches("Edit(")
-                        .trim_start_matches("MultiEdit(")
-                        .strip_suffix(')')
-                        .map(|s| s.to_string())
-                })
-                .next();
-            if let Some(path) = failed_edit_path {
-                if path == last_failed_edit_path {
-                    consecutive_edit_fail += 1;
-                } else {
-                    consecutive_edit_fail = 1;
-                    last_failed_edit_path = path;
-                }
-            } else if commands
-                .iter()
-                .any(|c| matches!(c, AiCommand::Edit { .. } | AiCommand::MultiEdit { .. }))
-            {
-                // edit コマンドが成功した場合はリセット
-                consecutive_edit_fail = 0;
-                last_failed_edit_path.clear();
-            }
-        }
+        counters.update(&commands, &tool_results);
 
         for msg in &messages {
             println!("\n{CYAN_BOLD}[AI]{RESET} {msg}");
@@ -1059,22 +1341,35 @@ pub async fn run_agent(
 
         // ── 4. 次のターンの状態を決定（明示的な Continuation パターン）────
         let ctx = build_context_header(user_task, &read_files, root, &done_log);
-        let outcome = determine_outcome(
+        let outcome = determine_outcome(&TurnState {
             user_task,
-            bot_message.as_deref(),
+            bot_message: bot_message.as_deref(),
             is_done,
             only_txt,
-            &tool_results,
+            tool_results: &tool_results,
             turn,
-            &ctx,
-            consecutive_txt,
-            &read_files,
+            ctx: &ctx,
+            consecutive_txt: counters.consecutive_txt,
+            read_files: &read_files,
+            done_log: &done_log,
             root,
             has_successful_file_update,
-            consecutive_read_file,
-            consecutive_ask_user,
-            consecutive_edit_fail,
-            &last_failed_edit_path,
+            consecutive_read_file: counters.consecutive_read_file,
+            consecutive_ask_user: counters.consecutive_ask_user,
+            consecutive_edit_fail: counters.consecutive_edit_fail,
+            last_failed_edit_path: &counters.last_failed_edit_path,
+        });
+
+        // ── 4.5 ストップフック（core-internals.md §「hooks.runStop()」参照）────
+        // Done が返っても、未完了 todo や未検証の Rust 変更があれば継続する
+        let outcome = apply_stop_hooks(
+            outcome,
+            user_task,
+            &ctx,
+            &done_log,
+            is_rust_project,
+            has_successful_file_update,
+            root,
         );
 
         dbg.turn_end();
@@ -1083,12 +1378,12 @@ pub async fn run_agent(
             TurnOutcome::Done => break 'agent,
 
             TurnOutcome::Continue { prompt: next } => {
-                consecutive_txt = 0;
+                counters.consecutive_txt = 0;
                 prompt = next;
             }
 
             TurnOutcome::NudgeForJson { prompt: next } => {
-                consecutive_txt += 1;
+                counters.consecutive_txt += 1;
                 prompt = next;
             }
 
@@ -1296,23 +1591,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let message = "codegen.rs の内容を確認しました。IR 拡張の次の具体的アクションを提案できますので、どの方向に拡張したいか指示してください。";
 
-        let outcome = determine_outcome(
-            "IRの拡張",
-            Some(message),
-            true,
-            false,
-            &[],
-            0,
-            "CTX",
-            0,
-            &HashSet::new(),
-            dir.path(),
-            false,
-            0,
-            0,
-            0,
-            "",
-        );
+        let outcome = determine_outcome(&TurnState {
+            user_task: "IRの拡張",
+            bot_message: Some(message),
+            is_done: true,
+            only_txt: false,
+            tool_results: &[],
+            turn: 0,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &HashSet::new(),
+            done_log: &[],
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 0,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+        });
 
         match outcome {
             TurnOutcome::NudgeForJson { prompt } => {
@@ -1328,6 +1624,77 @@ mod tests {
         let message = "src/agent/runner.rs を修正しました。cargo check も成功しています。";
 
         assert!(!is_deferring_development_message(message));
+    }
+
+    #[test]
+    fn incomplete_handoff_after_update_is_nudged_to_continue_or_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let message = "現状: 小説.md を場面単位で分割する方針に従い、現在 18 個までの scene ファイル（プレースホルダ付き）を作成しました。\n\n次に選べる作業（どれか一つを選んでください）:\n\n1) 原文を各 scene ファイルへ挿入して分割を完了する\n2) 主要 scene にだけ原文を挿入する\n3) 現状のまま作業を終了する\n\n推奨: 1 を選ぶと分割が完全に完了します。選択を教えてください。";
+
+        assert!(is_incomplete_handoff_message(message));
+
+        let outcome = determine_outcome(&TurnState {
+            user_task: "AI_LOGを参考に現在のソースコードを改善したい",
+            bot_message: Some(message),
+            is_done: true,
+            only_txt: false,
+            tool_results: &[],
+            turn: 0,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &HashSet::new(),
+            done_log: &[],
+            root: dir.path(),
+            has_successful_file_update: true,
+            consecutive_read_file: 0,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+        });
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("作業後のつなぎが未完了メニュー"));
+                assert!(prompt.contains("続けて実行"));
+            }
+            other => panic!("expected nudge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_hook_surfaces_unfinished_todo_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(crate::executor::LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todos = vec![crate::command::TodoItem {
+            id: "2".into(),
+            content: "TODO.JSON の未完了タスクを実行".into(),
+            status: crate::command::TodoStatus::InProgress,
+        }];
+        std::fs::write(
+            log_dir.join(todo_write::TODO_FILE),
+            serde_json::to_string_pretty(&todos).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = apply_stop_hooks(
+            TurnOutcome::Done,
+            "AI_LOGを参考に改善",
+            "CTX",
+            &[],
+            false,
+            false,
+            dir.path(),
+        );
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("TODO.JSON の未完了タスク"));
+                assert!(prompt.contains("[2] in_progress: TODO.JSON の未完了タスクを実行"));
+                assert!(prompt.contains("completed に更新"));
+            }
+            other => panic!("expected todo stop hook nudge, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1359,7 +1726,7 @@ mod tests {
     fn initial_prompt_for_ack_asks_for_concrete_task_without_tools() {
         let prompt = build_initial_prompt("おねがい");
 
-        assert!(prompt.contains("具体的な作業内容がありません"));
+        assert!(prompt.contains("具体的な作業対象が分かりません"));
         assert!(prompt.contains("ツールを実行せず"));
     }
 
@@ -1367,8 +1734,22 @@ mod tests {
     fn initial_prompt_for_menu_selection_asks_for_concrete_task_without_tools() {
         let prompt = build_initial_prompt("1. codegen");
 
-        assert!(prompt.contains("具体的な作業内容がありません"));
+        assert!(prompt.contains("具体的な作業対象が分かりません"));
         assert!(prompt.contains("過去の Copilot チャット文脈"));
+        assert!(prompt.contains("ツールを実行せず"));
+    }
+
+    #[test]
+    fn ambiguous_file_fill_request_is_short_circuited_without_resume() {
+        assert!(is_ambiguous_file_fill_request("中身をいれて"));
+        assert!(should_short_circuit_non_actionable_task(
+            "中身をいれて",
+            None
+        ));
+
+        let prompt = build_initial_prompt("中身をいれて");
+        assert!(prompt.contains("過去の Copilot チャット文脈"));
+        assert!(prompt.contains("具体的な作業対象"));
         assert!(prompt.contains("ツールを実行せず"));
     }
 
@@ -1438,6 +1819,46 @@ mod tests {
     }
 
     #[test]
+    fn split_task_requires_file_update() {
+        assert!(task_requires_file_update("mail.md を適切に分割したい"));
+        assert!(task_requires_file_split("mail.md を適切に分割したい"));
+        assert!(task_requires_file_split("小説.md を章ごとに分割して"));
+        assert!(!task_requires_file_split("mail.md を要約して"));
+    }
+
+    #[test]
+    fn placeholder_bot_message_is_nudged() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let outcome = determine_outcome(&TurnState {
+            user_task: "mail.md を適切に分割したい",
+            bot_message: Some("（完全な回答）"),
+            is_done: true,
+            only_txt: false,
+            tool_results: &[],
+            turn: 0,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &HashSet::new(),
+            done_log: &[],
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 0,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+        });
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("テンプレートの仮文"));
+                assert!(prompt.contains("具体的な回答本文"));
+            }
+            other => panic!("expected placeholder nudge, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn recovery_hint_warns_after_missing_read_file() {
         let results = vec![ToolResult::new(
             "ReadFile(src/parser.rs)",
@@ -1481,26 +1902,86 @@ mod tests {
     }
 
     #[test]
+    fn recovery_hint_explains_unread_write_guard() {
+        let results = vec![ToolResult::new(
+            "WriteFile(小説/01.md)",
+            "Permission denied: '小説/01.md' はこのタスク内で未読です。先に次を実行してから、同じ書き込みコマンドを再試行してください",
+        )];
+
+        let hint = recovery_hint_for_tool_results(&results);
+
+        assert!(hint.contains("未読ファイルへの書き込み"));
+        assert!(hint.contains("小説/01.md"));
+        assert!(hint.contains("まとめて `read_file`"));
+        assert!(hint.contains("同じ書き込み"));
+    }
+
+    #[test]
+    fn unread_guard_recovery_reads_nudge_to_retry_write_not_grep() {
+        let dir = tempfile::tempdir().unwrap();
+        let done_log = vec![
+            "✗ WriteFile(小説/01.md) → '小説/01.md' はこのタスク内で未読です".to_string(),
+            "✗ WriteFile(小説/02.md) → '小説/02.md' はこのタスク内で未読です".to_string(),
+            "✓ ReadFile(小説/01.md)".to_string(),
+            "✓ ReadFile(小説/02.md)".to_string(),
+            "✓ ReadFile(小説/03.md)".to_string(),
+        ];
+
+        let outcome = determine_outcome(&TurnState {
+            user_task: "中身をいれて",
+            bot_message: None,
+            is_done: false,
+            only_txt: false,
+            tool_results: &[
+                ToolResult::new("ReadFile(小説/01.md)", "content"),
+                ToolResult::new("ReadFile(小説/02.md)", "content"),
+                ToolResult::new("ReadFile(小説/03.md)", "content"),
+            ],
+            turn: 1,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &HashSet::new(),
+            done_log: &done_log,
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 3,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+        });
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("未読ガード回復"));
+                assert!(prompt.contains("再試行"));
+                assert!(!prompt.contains("連続 read_file が 3 件"));
+            }
+            other => panic!("expected unread-guard retry nudge, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn consecutive_read_file_3_triggers_nudge() {
         let dir = tempfile::tempdir().unwrap();
         // 3件連続 read_file → NudgeForJson が発動する
-        let outcome = determine_outcome(
-            "調査",
-            None,
-            false,
-            false,
-            &[ToolResult::new("ReadFile(src/c.rs)", "content")],
-            1,
-            "CTX",
-            0,
-            &HashSet::new(),
-            dir.path(),
-            false,
-            3, // consecutive_read_file
-            0,
-            0,
-            "",
-        );
+        let outcome = determine_outcome(&TurnState {
+            user_task: "調査",
+            bot_message: None,
+            is_done: false,
+            only_txt: false,
+            tool_results: &[ToolResult::new("ReadFile(src/c.rs)", "content")],
+            turn: 1,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &HashSet::new(),
+            done_log: &[],
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 3, // consecutive_read_file
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+        });
         match outcome {
             TurnOutcome::NudgeForJson { prompt } => {
                 assert!(prompt.contains("連続 read_file が 3 件に達しました"));
@@ -1514,23 +1995,24 @@ mod tests {
     fn consecutive_read_file_2_does_not_trigger_nudge() {
         let dir = tempfile::tempdir().unwrap();
         // 2件では NudgeForJson は発動しない（Continue になる）
-        let outcome = determine_outcome(
-            "調査",
-            None,
-            false,
-            false,
-            &[ToolResult::new("ReadFile(src/b.rs)", "content")],
-            1,
-            "CTX",
-            0,
-            &HashSet::new(),
-            dir.path(),
-            false,
-            2, // consecutive_read_file
-            0,
-            0,
-            "",
-        );
+        let outcome = determine_outcome(&TurnState {
+            user_task: "調査",
+            bot_message: None,
+            is_done: false,
+            only_txt: false,
+            tool_results: &[ToolResult::new("ReadFile(src/b.rs)", "content")],
+            turn: 1,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &HashSet::new(),
+            done_log: &[],
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 2, // consecutive_read_file
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+        });
         assert!(
             matches!(outcome, TurnOutcome::Continue { .. }),
             "2件では nudge しないはず: {outcome:?}"

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::executor::tools::todo_write;
+
 // ─── 圧縮閾値（core-internals.md §5 context-manager.mjs を参考） ──────────────
 
 /// この件数以下は全件表示
@@ -53,6 +55,8 @@ pub(super) fn build_context_header(
         }
     }
 
+    let unread_guard_recovery = recent_reads_satisfy_unread_guard(done_log);
+
     // read_file 連打を検知 — 直近 done_log の大半が ReadFile なら警告
     {
         let recent_reads = done_log
@@ -61,7 +65,7 @@ pub(super) fn build_context_header(
             .take(5)
             .filter(|s| s.contains("ReadFile("))
             .count();
-        if recent_reads >= 3 {
+        if recent_reads >= 3 && !unread_guard_recovery {
             warnings.push(
                 "[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。\
                 または十分な情報が揃っているなら今すぐ bot で回答してください。".to_string()
@@ -76,11 +80,26 @@ pub(super) fn build_context_header(
         if let Some(glob_pos) = last_glob_pos {
             let after_glob = &done_log[glob_pos + 1..];
             let has_grep_after = after_glob.iter().any(|s| s.contains("Grep("));
+            // @offset 付き継続読み込み（例: ReadFile(foo.md@498)）は同一ファイルの続きなので
+            // 独立したファイル読み込みとしてカウントしない
             let read_count_after = after_glob
                 .iter()
-                .filter(|s| s.contains("ReadFile("))
+                .filter(|s| s.contains("ReadFile(") && !s.contains('@'))
                 .count();
-            if read_count_after >= 2 && !has_grep_after {
+            // Glob後の最後の ReadFile 以降に構築的アクション（WriteFile / Edit / Mkdir 等）が
+            // あれば、エージェントは既に次のステップへ進んでいるので警告は不要
+            let last_read_idx = after_glob.iter().rposition(|s| s.contains("ReadFile("));
+            let has_moved_on = last_read_idx.map_or(false, |idx| {
+                after_glob[idx + 1..].iter().any(|s| {
+                    s.starts_with("✓ WriteFile(")
+                        || s.starts_with("✓ Edit(")
+                        || s.starts_with("✓ MultiEdit(")
+                        || s.starts_with("✓ Mkdir(")
+                        || s.starts_with("✓ Patch(")
+                })
+            });
+            if read_count_after >= 2 && !has_grep_after && !unread_guard_recovery && !has_moved_on
+            {
                 warnings.push(format!(
                     "[⚠ Glob 後に連続 read_file を検知 ({read_count_after} 件)] \
                     ファイル一覧取得後にファイルを順番に読むのは非効率です。\
@@ -100,15 +119,40 @@ pub(super) fn build_context_header(
             compact_file_list(read_files, root)
         ));
 
-        // ファイル読み過ぎ警告 — 10件超えたら grep 使用を促す
-        let count = read_files.len();
-        if count >= 10 {
+        // ファイル読み過ぎ警告 — WriteFile で追加されたパスを除外し、実際に ReadFile した
+        // ユニークファイル数（@offset の継続読みは同一ファイルとしてまとめる）でカウントする
+        let actual_read_count = {
+            let read_paths: HashSet<&str> = done_log
+                .iter()
+                .filter(|s| s.starts_with("✓ ReadFile("))
+                .filter_map(|s| {
+                    let inner = s.strip_prefix("✓ ReadFile(")?;
+                    let end = inner.find(')')?;
+                    let path = &inner[..end];
+                    // "@offset" を除いた実ファイルパスを返す
+                    Some(path.split('@').next().unwrap_or(path))
+                })
+                .collect();
+            read_paths.len()
+        };
+        if actual_read_count >= 10 {
             dynamic_lines.push(format!(
-                "[⚠ {count} ファイル読込済] これ以上 read_file を増やすのは非効率です。\
+                "[⚠ {actual_read_count} ファイル読込済] これ以上 read_file を増やすのは非効率です。\
                 必要な情報が揃ったら今すぐ bot でレビュー/回答を返してください。\
                 まだ必要なら grep でキーワード検索してから必要な箇所だけ read_file してください。"
             ));
         }
+    }
+
+    let todos = todo_write::load(root);
+    let unfinished = todo_write::unfinished(&todos);
+    if !unfinished.is_empty() {
+        dynamic_lines.push(format!(
+            "[TODO.JSON 未完了]\n{}\n\
+            TODO.JSON を実行計画として扱ってください。\
+            in_progress があればそれを先に実行し、完了後は todo_write で completed に更新してください。",
+            todo_write::format_todos_plain(&todos)
+        ));
     }
 
     if !done_log.is_empty() {
@@ -166,6 +210,51 @@ fn compact_done_log(done_log: &[String]) -> String {
             .join(" → ");
         format!("[完了済みアクション]\n{header}\n[Recent] {recent_str}")
     }
+}
+
+fn recent_reads_satisfy_unread_guard(done_log: &[String]) -> bool {
+    let mut pending = HashSet::new();
+    let mut recovered = HashSet::new();
+    for entry in done_log {
+        if entry.starts_with("✗ ")
+            && entry.contains("このタスク内で未読です")
+            && let Some(path) = done_log_label_inner(entry)
+        {
+            pending.insert(path.to_string());
+        } else if entry.starts_with("✓ ReadFile(")
+            && let Some(path) = done_log_label_inner(entry)
+            && pending.contains(path)
+        {
+            recovered.insert(path.to_string());
+        } else if (entry.starts_with("✓ WriteFile(")
+            || entry.starts_with("✓ Edit(")
+            || entry.starts_with("✓ MultiEdit(")
+            || entry.starts_with("✓ Patch("))
+            && let Some(path) = done_log_label_inner(entry)
+        {
+            pending.remove(path);
+            recovered.remove(path);
+        }
+    }
+
+    if recovered.is_empty() {
+        return false;
+    }
+
+    done_log
+        .iter()
+        .rev()
+        .take(5)
+        .filter(|entry| entry.starts_with("✓ ReadFile("))
+        .filter_map(|entry| done_log_label_inner(entry))
+        .any(|path| recovered.contains(path))
+}
+
+fn done_log_label_inner(entry: &str) -> Option<&str> {
+    let start = entry.find('(')?;
+    let rest = &entry[start + 1..];
+    let end = rest.find(')')?;
+    Some(&rest[..end])
 }
 
 /// Claude Code の "[Context compacted — summary of N earlier messages]" 形式のヘッダー
@@ -394,5 +483,107 @@ mod tests {
         ];
         let out = build_context_header("調査", &HashSet::new(), root, &log);
         assert!(!out.contains("Glob 後に連続 read_file"), "1件では警告不要");
+    }
+
+    #[test]
+    fn unread_guard_recovery_reads_do_not_trigger_read_spam_warning() {
+        let root = Path::new("/root");
+        let log = vec![
+            "✗ WriteFile(小説/01.md) → '小説/01.md' はこのタスク内で未読です".to_string(),
+            "✗ WriteFile(小説/02.md) → '小説/02.md' はこのタスク内で未読です".to_string(),
+            "✗ WriteFile(小説/03.md) → '小説/03.md' はこのタスク内で未読です".to_string(),
+            "✓ ReadFile(小説/01.md)".to_string(),
+            "✓ ReadFile(小説/02.md)".to_string(),
+            "✓ ReadFile(小説/03.md)".to_string(),
+        ];
+
+        let out = build_context_header("中身をいれて", &HashSet::new(), root, &log);
+
+        assert!(!out.contains("連続 read_file を検知"));
+        assert!(!out.contains("Glob 後に連続 read_file"));
+    }
+
+    #[test]
+    fn test_glob_then_reads_no_warn_after_write() {
+        // Glob → ReadFile×2 → WriteFile（構築的アクション）が続いた後は警告不要
+        let root = Path::new("/root");
+        let log = vec![
+            "✓ Glob(**/mail.md)".to_string(),
+            "✓ ReadFile(mail.md)".to_string(),
+            "✓ ReadFile(mail.md@498)".to_string(),
+            "✓ Mkdir(mail)".to_string(),
+            "✓ WriteFile(mail/01.md)".to_string(),
+            "✓ WriteFile(mail/02.md)".to_string(),
+        ];
+        let out = build_context_header("分割", &HashSet::new(), root, &log);
+        assert!(
+            !out.contains("Glob 後に連続 read_file"),
+            "WriteFile後は警告を出すべきでない"
+        );
+    }
+
+    #[test]
+    fn test_glob_then_offset_reads_not_counted_as_multiple() {
+        // @offset 付き継続読み込みは独立したファイルとしてカウントしないので警告しない
+        let root = Path::new("/root");
+        let log = vec![
+            "✓ Glob(**/mail.md)".to_string(),
+            "✓ ReadFile(mail.md)".to_string(),
+            "✓ ReadFile(mail.md@498)".to_string(),
+        ];
+        let out = build_context_header("分割", &HashSet::new(), root, &log);
+        assert!(
+            !out.contains("Glob 後に連続 read_file"),
+            "@offset は継続読みなので1ファイル扱い → 警告不要"
+        );
+    }
+
+    #[test]
+    fn test_read_file_count_warning_excludes_write_only_files() {
+        // WriteFile で read_files に追加されたパスを除外し、実際の ReadFile 数で判定する
+        let root = Path::new("/root");
+        let mut read_files = HashSet::new();
+        // 1件 ReadFile + 11件 WriteFile（read_files.len() = 12 だが実 ReadFile は 1）
+        read_files.insert(PathBuf::from("/root/source.md"));
+        for i in 0..11 {
+            read_files.insert(PathBuf::from(format!("/root/output/out{i:02}.md")));
+        }
+        // done_log には ReadFile が 1件だけ
+        let log = vec!["✓ ReadFile(source.md)".to_string()];
+        let out = build_context_header("分割", &read_files, root, &log);
+        assert!(
+            !out.contains("ファイル読込済"),
+            "実 ReadFile が少なければ読み過ぎ警告は不要"
+        );
+    }
+
+    #[test]
+    fn context_header_includes_unfinished_todo_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(crate::executor::LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todos = vec![
+            crate::command::TodoItem {
+                id: "1".into(),
+                content: "ログの失敗パターンを確認".into(),
+                status: crate::command::TodoStatus::Completed,
+            },
+            crate::command::TodoItem {
+                id: "2".into(),
+                content: "TODO.JSON を動的コンテキストへ出す".into(),
+                status: crate::command::TodoStatus::InProgress,
+            },
+        ];
+        std::fs::write(
+            log_dir.join(todo_write::TODO_FILE),
+            serde_json::to_string_pretty(&todos).unwrap(),
+        )
+        .unwrap();
+
+        let out = build_context_header("改善", &HashSet::new(), dir.path(), &[]);
+
+        assert!(out.contains("TODO.JSON 未完了"));
+        assert!(out.contains("[2] in_progress: TODO.JSON を動的コンテキストへ出す"));
+        assert!(out.contains("completed に更新"));
     }
 }

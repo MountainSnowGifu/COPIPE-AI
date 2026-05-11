@@ -29,6 +29,8 @@ pub enum AiCommand {
     },
     ReadLog {
         filename: String,
+        #[serde(default)]
+        offset_lines: usize,
     },
     ReadFile {
         path: String,
