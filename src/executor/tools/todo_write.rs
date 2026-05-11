@@ -5,6 +5,29 @@ use std::path::Path;
 
 pub const TODO_FILE: &str = "todo.json";
 
+pub fn init_empty(root: &Path) -> std::io::Result<()> {
+    let log_dir = root.join(LOG_DIR);
+    std::fs::create_dir_all(&log_dir)?;
+    let todo_path = log_dir.join(TODO_FILE);
+
+    if todo_path
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "todo.json is a symlink",
+        ));
+    }
+
+    if !todo_path.exists() {
+        std::fs::write(todo_path, "[]\n")?;
+    }
+
+    Ok(())
+}
+
 /// タスクリストを更新し、ターミナルに表示して永続化する
 pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
     if todos.is_empty() {
@@ -237,5 +260,31 @@ mod tests {
         let dir = std::env::temp_dir().join("copipe_todo_test_nonexistent");
         let result = load(&dir);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_init_empty_creates_todo_json() {
+        let dir = tempfile::tempdir().unwrap();
+
+        init_empty(dir.path()).unwrap();
+
+        let todo_path = dir.path().join(LOG_DIR).join(TODO_FILE);
+        assert_eq!(std::fs::read_to_string(todo_path).unwrap(), "[]\n");
+    }
+
+    #[test]
+    fn test_init_empty_keeps_existing_todo_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todo_path = log_dir.join(TODO_FILE);
+        std::fs::write(&todo_path, "[{\"id\":\"1\"}]\n").unwrap();
+
+        init_empty(dir.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(todo_path).unwrap(),
+            "[{\"id\":\"1\"}]\n"
+        );
     }
 }

@@ -171,12 +171,16 @@ mod tests {
         let mut result = ToolResult::new("ReadLog(cmd_log@50)", long.as_str());
         result.label = "ReadLog(cmd_log@50)".to_string();
         let result = run("read_log", result);
-        let offset: usize = result.output
+        let offset: usize = result
+            .output
             .split("\"offset_lines\":")
             .nth(1)
             .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
             .and_then(|s| s.parse().ok())
             .expect("offset_lines が含まれるべき");
-        assert!(offset > 50, "offset は base(50) + shown_lines より大きいはず");
+        assert!(
+            offset > 50,
+            "offset は base(50) + shown_lines より大きいはず"
+        );
     }
 }

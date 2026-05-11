@@ -46,7 +46,9 @@ pub fn handle(ctx: &ToolContext<'_>, filename: &str, offset_lines: usize) -> Too
                             .collect::<Vec<_>>()
                             .join("\n");
                         if skipped.is_empty() {
-                            format!("[{offset_lines} 行目以降は存在しません（全 {total_lines} 行）]")
+                            format!(
+                                "[{offset_lines} 行目以降は存在しません（全 {total_lines} 行）]"
+                            )
                         } else {
                             skipped
                         }

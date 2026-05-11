@@ -1,2 +1,114 @@
 [送信:ボタン] clicked:button[aria-label*="送信"]
 ---
+[2026-05-12 05:41:29 JST] before send_raw: prompt_len=911
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:41:53 JST] after send_raw: ok
+---
+[2026-05-12 05:41:54 JST] before send_raw: prompt_len=1359
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:42:15 JST] after send_raw: ok
+---
+[2026-05-12 05:42:17 JST] before send_raw: prompt_len=1380
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:42:41 JST] after send_raw: ok
+---
+[2026-05-12 05:42:43 JST] before send_raw: prompt_len=1385
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:43:39 JST] after send_raw: ok
+---
+[2026-05-12 05:44:23 JST] before send_raw: prompt_len=1500
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:44:43 JST] after send_raw: ok
+---
+[2026-05-12 05:44:44 JST] before send_raw: prompt_len=2699
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:45:21 JST] after send_raw: ok
+---
+[2026-05-12 05:45:23 JST] before send_raw: prompt_len=2691
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:45:47 JST] after send_raw: ok
+---
+[2026-05-12 05:45:48 JST] before send_raw: prompt_len=1735
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:46:45 JST] after send_raw: ok
+---
+[2026-05-12 05:53:25 JST] before send_raw: prompt_len=1689
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:53:58 JST] after send_raw: ok
+---
+[2026-05-12 05:53:59 JST] before send_raw: prompt_len=2888
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:54:21 JST] after send_raw: ok
+---
+[2026-05-12 05:54:23 JST] before send_raw: prompt_len=2888
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:54:46 JST] after send_raw: ok
+---
+[2026-05-12 05:54:48 JST] before send_raw: prompt_len=1861
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:55:43 JST] after send_raw: ok
+---
+[2026-05-12 05:55:47 JST] before send_raw: prompt_len=1815
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:56:19 JST] after send_raw: ok
+---
+[2026-05-12 05:56:20 JST] before send_raw: prompt_len=3018
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:56:50 JST] after send_raw: ok
+---
+[2026-05-12 05:56:51 JST] before send_raw: prompt_len=3018
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:57:11 JST] after send_raw: ok
+---
+[2026-05-12 05:57:13 JST] before send_raw: prompt_len=1987
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:58:11 JST] after send_raw: ok
+---
+[2026-05-12 05:58:14 JST] before send_raw: prompt_len=1943
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:58:50 JST] after send_raw: ok
+---
+[2026-05-12 05:58:51 JST] before send_raw: prompt_len=2784
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---
+[2026-05-12 05:59:28 JST] after send_raw: ok
+---
+[2026-05-12 05:59:29 JST] before send_raw: prompt_len=2739
+---
+[送信:ボタン] clicked:button[aria-label*="送信"]
+---

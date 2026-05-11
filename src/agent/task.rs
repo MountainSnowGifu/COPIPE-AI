@@ -12,8 +12,8 @@ use std::path::Path;
 /// ファイル名が明示されている場合、AI は glob を省略して直接 read_file へ進める。
 pub(super) fn task_mentions_explicit_filename(task: &str) -> bool {
     const KNOWN_EXTS: &[&str] = &[
-        "md", "txt", "rs", "toml", "json", "yaml", "yml", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "h",
-        "html", "css", "sh", "hs", "lhs", "cabal",
+        "md", "txt", "rs", "toml", "json", "yaml", "yml", "py", "js", "ts", "tsx", "jsx", "c",
+        "cpp", "h", "html", "css", "sh", "hs", "lhs", "cabal",
     ];
     task.split_whitespace().any(|word| {
         let w = word.trim_matches(|c: char| "「」。、！？()[]{}\"'".contains(c));

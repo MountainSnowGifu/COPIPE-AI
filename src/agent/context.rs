@@ -98,8 +98,7 @@ pub(super) fn build_context_header(
                         || s.starts_with("✓ Patch(")
                 })
             });
-            if read_count_after >= 2 && !has_grep_after && !unread_guard_recovery && !has_moved_on
-            {
+            if read_count_after >= 2 && !has_grep_after && !unread_guard_recovery && !has_moved_on {
                 warnings.push(format!(
                     "[⚠ Glob 後に連続 read_file を検知 ({read_count_after} 件)] \
                     ファイル一覧取得後にファイルを順番に読むのは非効率です。\

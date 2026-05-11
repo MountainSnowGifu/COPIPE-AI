@@ -47,24 +47,36 @@ const BLOCKED_CARGO_SUBCMDS: &[&str] = &["run", "test", "bench", "fix", "install
 
 /// cabal で許可するサブコマンド
 /// run / test / bench / exec は任意コードを実行するため除外。
-const ALLOWED_CABAL_SUBCMDS: &[&str] = &["build", "check", "clean", "haddock", "sdist", "info", "list", "freeze"];
+const ALLOWED_CABAL_SUBCMDS: &[&str] = &[
+    "build", "check", "clean", "haddock", "sdist", "info", "list", "freeze",
+];
 
 /// cabal で明示的に拒否するサブコマンド（任意コード実行の恐れ）
-const BLOCKED_CABAL_SUBCMDS: &[&str] = &["run", "test", "bench", "exec", "install", "upload", "publish"];
+const BLOCKED_CABAL_SUBCMDS: &[&str] = &[
+    "run", "test", "bench", "exec", "install", "upload", "publish",
+];
 
 /// stack で許可するサブコマンド
 /// run / test / exec / script / ghci はバイナリ・テストコードを実行するため除外。
-const ALLOWED_STACK_SUBCMDS: &[&str] = &["build", "clean", "haddock", "sdist", "ls", "query", "path", "dot", "ide"];
+const ALLOWED_STACK_SUBCMDS: &[&str] = &[
+    "build", "clean", "haddock", "sdist", "ls", "query", "path", "dot", "ide",
+];
 
 /// stack で明示的に拒否するサブコマンド（任意コード実行の恐れ）
-const BLOCKED_STACK_SUBCMDS: &[&str] = &["run", "test", "bench", "exec", "ghci", "repl", "script", "install", "upload", "publish"];
+const BLOCKED_STACK_SUBCMDS: &[&str] = &[
+    "run", "test", "bench", "exec", "ghci", "repl", "script", "install", "upload", "publish",
+];
 
 /// npm で許可するサブコマンド
 /// run / exec / start / test はpackage.jsonの任意スクリプトを実行するため除外。
-const ALLOWED_NPM_SUBCMDS: &[&str] = &["install", "ci", "list", "ls", "audit", "outdated", "view", "info", "show", "pack"];
+const ALLOWED_NPM_SUBCMDS: &[&str] = &[
+    "install", "ci", "list", "ls", "audit", "outdated", "view", "info", "show", "pack",
+];
 
 /// npm で明示的に拒否するサブコマンド（任意コード実行の恐れ）
-const BLOCKED_NPM_SUBCMDS: &[&str] = &["run", "exec", "start", "test", "publish", "init", "link", "unlink"];
+const BLOCKED_NPM_SUBCMDS: &[&str] = &[
+    "run", "exec", "start", "test", "publish", "init", "link", "unlink",
+];
 
 /// コマンド固有の危険フラグ（allowlist 通過後に追加チェック）
 const BLOCKED_ARGS: &[(&str, &[&str])] = &[("find", &["-delete", "-exec", "-execdir"])];

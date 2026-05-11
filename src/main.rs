@@ -7,8 +7,7 @@ mod session;
 
 use agent::{SessionStore, build_system_prompt, run_agent};
 use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW, use_unicode};
-use executor::CheckpointManager;
-use executor::LOG_DIR;
+use executor::{CheckpointManager, LOG_DIR, init_todo_log};
 use session::CopilotSession;
 
 // #6: セクション分けされたヘルプ + #9: Ctrl+C 明記
@@ -101,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         }
         std::fs::write(&log_path, "").ok();
     }
+    init_todo_log(&root)?;
 
     // チェックポイントマネージャとセッションストアを初期化
     let mut checkpoints = CheckpointManager::new(&root);

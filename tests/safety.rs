@@ -119,7 +119,12 @@ fn stack_ghci_blocked() {
 
 #[test]
 fn stack_exec_blocked() {
-    let cmd = vec!["stack".to_string(), "exec".to_string(), "--".to_string(), "myapp".to_string()];
+    let cmd = vec![
+        "stack".to_string(),
+        "exec".to_string(),
+        "--".to_string(),
+        "myapp".to_string(),
+    ];
     assert!(check_cmd_safety(&cmd).is_err());
 }
 
@@ -146,7 +151,11 @@ fn eslint_allowed() {
 
 #[test]
 fn prettier_check_allowed() {
-    let cmd = vec!["prettier".to_string(), "--check".to_string(), "src/".to_string()];
+    let cmd = vec![
+        "prettier".to_string(),
+        "--check".to_string(),
+        "src/".to_string(),
+    ];
     assert!(check_cmd_safety(&cmd).is_ok());
 }
 

@@ -19,6 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const LOG_DIR: &str = ".copipe_logs";
 pub const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "browser_log", "todo"];
 
+pub fn init_todo_log(root: &Path) -> std::io::Result<()> {
+    tools::todo_write::init_empty(root)
+}
+
 /// ログファイルへの安全な追記（O_NOFOLLOW で TOCTOU を防ぐ）
 pub fn safe_append_log(path: &Path, content: &str) {
     #[cfg(unix)]
@@ -295,7 +299,10 @@ pub async fn execute(
                 tools::patch::handle(&mut ctx, path, diff)
             ),
 
-            AiCommand::ReadLog { filename, offset_lines } => dispatch!(
+            AiCommand::ReadLog {
+                filename,
+                offset_lines,
+            } => dispatch!(
                 "read_log",
                 if *offset_lines > 0 {
                     format!("ReadLog({filename}@{offset_lines})")
