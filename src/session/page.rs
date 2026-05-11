@@ -1,4 +1,5 @@
 use super::dom::{looks_like_bot_challenge, page_diagnostic};
+use super::input::INPUT_SELECTOR;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::emulation::{
     SetAutomationOverrideParams, SetDeviceMetricsOverrideParams,
@@ -12,6 +13,27 @@ const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 const ACCEPT_LANGUAGE: &str = "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7";
 
 const ANTI_BOT_JS: &str = r#"
+window.__copipeFindInput = function() {
+    const selectors = [
+        '#userInput',
+        'textarea[name="userInput"]',
+        'textarea[aria-label*="Message"]',
+        'textarea[aria-label*="message"]',
+        'textarea[aria-label*="メッセージ"]',
+        'textarea[placeholder*="Message"]',
+        'textarea[placeholder*="message"]',
+        'textarea[placeholder*="メッセージ"]',
+        'textarea',
+        '[contenteditable="true"][role="textbox"]',
+        '[role="textbox"][contenteditable="true"]'
+    ];
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+    }
+    return null;
+};
+
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 
 for (const key of ['cdc_adoQpoasnfa76pfcZLmcfl_Array', 'cdc_adoQpoasnfa76pfcZLmcfl_Promise', 'cdc_adoQpoasnfa76pfcZLmcfl_Symbol']) {
@@ -244,29 +266,45 @@ pub(super) async fn get_ws_url(port: u16) -> anyhow::Result<String> {
     anyhow::bail!("Edge の CDP に接続できませんでした (port {port})")
 }
 
-pub(super) async fn wait_for_element(
+pub(super) async fn wait_for_input(
     page: &chromiumoxide::Page,
-    selector: &str,
     timeout_secs: u64,
-) -> anyhow::Result<chromiumoxide::element::Element> {
+) -> anyhow::Result<()> {
+    let selector_json = serde_json::to_string(INPUT_SELECTOR)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let start = tokio::time::Instant::now();
     let mut last_report = 0u64;
+
     loop {
-        match page.find_element(selector).await {
-            Ok(el) => return Ok(el),
-            Err(_) => {
-                if tokio::time::Instant::now() >= deadline {
-                    anyhow::bail!("タイムアウト: セレクター '{selector}' が見つかりません");
-                }
-                let elapsed = start.elapsed().as_secs();
-                if elapsed >= last_report + 5 && elapsed > 0 {
-                    eprintln!("  要素待機中... ({}秒経過)", elapsed);
-                    last_report = elapsed;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+        let js = format!(
+            r#"
+            (() => {{
+                const fallback = () => document.querySelector({selector_json});
+                const el = window.__copipeFindInput ? window.__copipeFindInput() : fallback();
+                return !!el;
+            }})()
+            "#
+        );
+        let found = page
+            .evaluate_expression(&js)
+            .await
+            .ok()
+            .and_then(|r| r.value().and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        if found {
+            return Ok(());
         }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("タイムアウト: Copilot の入力欄が見つかりません");
+        }
+
+        let elapsed = start.elapsed().as_secs();
+        if elapsed >= last_report + 5 && elapsed > 0 {
+            eprintln!("  入力欄待機中... ({}秒経過)", elapsed);
+            last_report = elapsed;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -327,7 +365,7 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
     std::io::stdout().flush().ok();
 
     // 入力欄を待機。見つからない場合は BOT チャレンジを確認してユーザーに回復を促す
-    if let Err(_) = wait_for_element(&page, "#userInput", 20).await {
+    if let Err(_) = wait_for_input(&page, 20).await {
         let diag = page_diagnostic(&page).await;
         if looks_like_bot_challenge(&diag) {
             println!();
@@ -348,13 +386,11 @@ pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<ch
                 anyhow::bail!("ログイン待機がタイムアウトしました（120秒）。再実行してください");
             }
             // 再待機（最大60秒）
-            wait_for_element(&page, "#userInput", 60)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "ログイン後も入力欄が見つかりませんでした。ブラウザを確認してください"
-                    )
-                })?;
+            wait_for_input(&page, 60).await.map_err(|_| {
+                anyhow::anyhow!(
+                    "ログイン後も入力欄が見つかりませんでした。ブラウザを確認してください"
+                )
+            })?;
         } else {
             anyhow::bail!("Copilot の入力欄が見つかりません。ブラウザを確認してください");
         }

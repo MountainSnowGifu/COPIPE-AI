@@ -29,9 +29,9 @@ pub(super) const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
   bot:       message
 JSONの後に文章を続けず、コードブロック(```json ... ```)で出力してください。"#;
 
-/// JSON文字列値内の生の改行・タブをエスケープして修復を試みる
+/// JSON文字列値内の生の制御文字をエスケープして修復を試みる
 fn sanitize_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len() + 64);
     let mut in_string = false;
     let mut escaped = false;
     for ch in s.chars() {
@@ -52,6 +52,12 @@ fn sanitize_json(s: &str) -> String {
             '\n' if in_string => out.push_str("\\n"),
             '\r' if in_string => out.push_str("\\r"),
             '\t' if in_string => out.push_str("\\t"),
+            '\x08' if in_string => out.push_str("\\b"),
+            '\x0c' if in_string => out.push_str("\\f"),
+            c if in_string && (c as u32) < 0x20 => {
+                // その他の制御文字 (U+0000–U+001F) を \uXXXX へ変換
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
             _ => out.push(ch),
         }
     }
@@ -72,4 +78,44 @@ pub(super) fn parse_blocks(blocks: &[String]) -> (Vec<AiCommand>, Vec<String>) {
         }
     }
     (commands, errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_blocks_accepts_logged_array_response() {
+        let block = r#"[
+  {
+    "type": "txt",
+    "content": "警告を減らしてコードをきれいにします。"
+  },
+  {
+    "type": "cmd",
+    "name": "cargo check",
+    "cmd": ["cargo", "check"],
+    "workdir": ".",
+    "timeout": 120
+  }
+]"#;
+
+        let (commands, errors) = parse_blocks(&[block.to_string()]);
+
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(commands[0], AiCommand::Txt { .. }));
+        assert!(matches!(commands[1], AiCommand::Cmd { .. }));
+    }
+
+    #[test]
+    fn parse_blocks_repairs_raw_newline_inside_string() {
+        let block = "{ \"type\": \"txt\", \"content\": \"line1\nline2\" }";
+
+        let (commands, errors) = parse_blocks(&[block.to_string()]);
+
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(commands[0], AiCommand::Txt { .. }));
+    }
 }

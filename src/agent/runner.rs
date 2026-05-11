@@ -141,6 +141,24 @@ fn determine_outcome(
     consecutive_edit_fail: u32,
     last_failed_edit_path: &str,
 ) -> TurnOutcome {
+    if is_done && let Some(message) = bot_message {
+        let missing_paths = missing_referenced_project_paths(message, root);
+        if !missing_paths.is_empty() {
+            return TurnOutcome::NudgeForJson {
+                prompt: format!(
+                    "{ctx}\n\n\
+                    [⚠ 最終回答に、現在の作業ディレクトリに存在しないパスが含まれています]\n\
+                    存在しないパス: {}\n\
+                    ログや過去文脈のファイル名を現在の事実として扱わないでください。\
+                    `glob` / `grep` / `read_file` の実行結果で実在を確認したファイルだけを根拠にして、\
+                    必要なら調査をやり直してください。\n\
+                    ```json\n{{\"type\":\"glob\",\"pattern\":\"src/**/*.rs\"}}\n```",
+                    missing_paths.join(", ")
+                ),
+            };
+        }
+    }
+
     if is_done && task_requires_review_output(user_task) {
         if bot_message
             .map(is_placeholder_review_message)
@@ -270,14 +288,86 @@ fn determine_outcome(
         return TurnOutcome::MaxTurns;
     }
 
+    // コンパイラの help: 提案がある場合は追加調査なしで直接修正するよう促す
+    let compiler_hint = if tool_results.iter().any(|r| {
+        r.label.starts_with("Cmd(")
+            && crate::executor::errors::is_error_output(&r.output)
+            && r.output.contains("help:")
+            && (r.output.contains("error[E") || r.output.contains("error:"))
+    }) {
+        "\n\n[コンパイラが修正提案を示しています]\n\
+        上記エラー出力の `help:` 行を参考に、追加の read_file や grep を挟まず、\
+        今すぐ `edit` または `multi_edit` でファイルを直接修正してください。"
+    } else {
+        ""
+    };
+
+    let recovery_hint = recovery_hint_for_tool_results(tool_results);
+
     // 通常の継続：ツール結果を次のプロンプトに組み込む
     TurnOutcome::Continue {
         // system_prompt.md §「動的コンテキストの形式」に準拠したセクション構造
         prompt: format!(
-            "{ctx}\n\n## Tool results\n{}",
-            format_tool_results(tool_results)
+            "{ctx}\n\n## Tool results\n{}{}{}",
+            format_tool_results(tool_results),
+            compiler_hint,
+            recovery_hint
         ),
     }
+}
+
+fn recovery_hint_for_tool_results(tool_results: &[ToolResult]) -> String {
+    let missing_read_paths: Vec<String> = tool_results
+        .iter()
+        .filter(|r| r.label.starts_with("ReadFile(") && r.output.contains("ファイルが存在しません"))
+        .filter_map(|r| label_inner(&r.label).map(str::to_string))
+        .collect();
+
+    let missing_path_hint = if missing_read_paths.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n[存在しないファイルを読もうとしました]\n\
+            存在しないパス: {}\n\
+            そのファイルの内容や crate 構造を推測して回答しないでください。\
+            `glob` / `list_dir` / `grep` で現在の作業ディレクトリに実在するファイルを確認し、\
+            実在するファイルだけを根拠に次のアクションを決めてください。",
+            missing_read_paths.join(", ")
+        )
+    };
+
+    let blocked_cargo_hint = if tool_results.iter().any(|r| {
+        r.label.starts_with("Cmd(")
+            && r.output.contains("cargo test")
+            && r.output.contains("任意コードを実行")
+    }) {
+        "\n\n[cargo test は実行できません]\n\
+        テストのコンパイル確認が目的なら、次は `cmd` で `[\"cargo\",\"check\",\"--tests\"]` \
+        または `[\"cargo\",\"check\",\"--all-targets\"]` を実行してください。\
+        実際のテスト実行が必須なら、`bot` で実行不可と残リスクを報告してください。"
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let parent_dir_hint = if tool_results.iter().any(|r| {
+        r.label.starts_with("WriteFile(") && r.output.contains("親ディレクトリが存在しません")
+    }) {
+        "\n\n[書き込み先の親ディレクトリがありません]\n\
+        同じ `file` を再試行する前に、必要な親ディレクトリを `mkdir` で作成してください。\
+        例: `.github/workflows/file.yml` なら先に `.github` と `.github/workflows` を作成します。"
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    format!("{missing_path_hint}{blocked_cargo_hint}{parent_dir_hint}")
+}
+
+fn label_inner(label: &str) -> Option<&str> {
+    label
+        .find('(')
+        .and_then(|start| label.strip_suffix(')').map(|s| &s[start + 1..]))
 }
 
 fn read_file_hint(read_files: &HashSet<PathBuf>, root: &Path) -> String {
@@ -296,9 +386,26 @@ fn read_file_hint(read_files: &HashSet<PathBuf>, root: &Path) -> String {
 }
 
 fn build_initial_prompt(user_task: &str) -> String {
+    if is_non_actionable_ack(user_task) || is_menu_selection_without_context(user_task) {
+        return format!(
+            "## New task boundary\n\
+            これは新規タスクです。過去の Copilot チャット文脈や別環境のログ内容を続きとして扱わないでください。\n\n\
+            [元のタスク] {user_task}\n\n\
+            依頼内容が短い相づちだけで、現在のコードベースに対する具体的な作業内容がありません。\
+            ツールを実行せず、`bot` で「具体的な作業内容を入力してください」と簡潔に返してください。"
+        );
+    }
+
+    let boundary = "## New task boundary\n\
+        これは新規タスクです。Dynamic context に前回セッションからの再開が明示されていない限り、\
+        過去の Copilot チャット文脈や別環境のログ内容を続きとして扱わないでください。\
+        ユーザーが明示的に提示したログは失敗パターンの診断材料として扱ってかまいませんが、\
+        ログ内の作業対象・crate 名・ファイル名・実行結果を現在の環境の事実として採用しないでください。\
+        現在の作業ディレクトリに存在するファイルだけを根拠にしてください。\n\n";
+
     if task_requires_review_output(user_task) {
         return format!(
-            "{user_task}\n\n\
+            "{boundary}{user_task}\n\n\
             [効率化ヒント]\n\
             - レビュー対象ファイルが依頼文から明確なら、空 grep を挟まず直接 read_file してください。\n\
             - glob や list_dir の結果が返ったら、それを根拠に調査対象を絞り込んでください（「見つからない」と判断して list_dir を重ねないこと）。\n\
@@ -308,7 +415,73 @@ fn build_initial_prompt(user_task: &str) -> String {
         );
     }
 
-    user_task.to_string()
+    format!("{boundary}{user_task}")
+}
+
+fn is_non_actionable_ack(task: &str) -> bool {
+    let normalized = task
+        .trim()
+        .trim_matches(|c: char| {
+            c.is_ascii_punctuation()
+                || c.is_whitespace()
+                || matches!(c, '。' | '、' | '！' | '？' | '!' | '?')
+        })
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "お願い"
+            | "おねがい"
+            | "頼む"
+            | "よろしく"
+            | "続き"
+            | "つづき"
+            | "続けて"
+            | "つづけて"
+            | "はい"
+            | "うん"
+            | "ok"
+            | "okay"
+            | "continue"
+            | "yes"
+            | "y"
+            | "go"
+    )
+}
+
+fn is_menu_selection_without_context(task: &str) -> bool {
+    let normalized = task.trim().trim_matches(|c: char| {
+        c.is_ascii_punctuation()
+            || c.is_whitespace()
+            || matches!(c, '。' | '、' | '！' | '？' | '!' | '?' | '．')
+    });
+
+    if normalized.chars().all(|c| c.is_ascii_digit()) {
+        return !normalized.is_empty();
+    }
+
+    let mut parts = normalized.split_whitespace();
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let rest = parts.collect::<Vec<_>>().join(" ");
+    let first = first
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || matches!(c, '。' | '、' | '．'));
+
+    first.chars().all(|c| c.is_ascii_digit())
+        && !rest.is_empty()
+        && rest.chars().count() <= 32
+        && !rest.contains("して")
+        && !rest.contains("修正")
+        && !rest.contains("実装")
+        && !rest.contains("追加")
+        && !rest.contains("調査")
+        && !rest.contains("レビュー")
+        && !rest.to_ascii_lowercase().contains("fix")
+        && !rest.to_ascii_lowercase().contains("implement")
+}
+
+fn should_short_circuit_non_actionable_task(task: &str, resume: Option<&SessionData>) -> bool {
+    resume.is_none() && (is_non_actionable_ack(task) || is_menu_selection_without_context(task))
 }
 
 fn task_requires_file_update(task: &str) -> bool {
@@ -328,17 +501,23 @@ fn task_requires_file_update(task: &str) -> bool {
 }
 
 fn task_requires_review_output(task: &str) -> bool {
-    task.contains("レビュー")
-        || task.to_ascii_lowercase().contains("review")
+    let lower = task.to_ascii_lowercase();
+    let explicit_review = task.contains("レビュー")
+        || lower.contains("review")
         || task.contains("総括")
         || task.contains("問題点")
         || task.contains("調査")
         || task.contains("分析")
         || task.contains("チェック")
         || task.contains("調べ")
-        || task.to_ascii_lowercase().contains("check")
-        || task.to_ascii_lowercase().contains("analyz")
-        || task.to_ascii_lowercase().contains("inspect")
+        || lower.contains("analyz")
+        || lower.contains("inspect");
+
+    if lower.contains("cargo check") && !explicit_review {
+        return false;
+    }
+
+    explicit_review || lower.contains("check")
 }
 
 fn is_placeholder_review_message(message: &str) -> bool {
@@ -376,6 +555,57 @@ fn is_placeholder_review_message(message: &str) -> bool {
     ];
     let concrete_hits = concrete_markers.iter().filter(|p| m.contains(**p)).count();
     placeholder_hits >= 2 && concrete_hits < 3
+}
+
+fn missing_referenced_project_paths(message: &str, root: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    for token in message.split_whitespace() {
+        let Some(start) = token.find(|c: char| c.is_ascii_alphanumeric() || c == '.') else {
+            continue;
+        };
+        let candidate = token[start..].trim_matches(|c: char| {
+            c.is_ascii_punctuation()
+                || c.is_whitespace()
+                || matches!(
+                    c,
+                    '`' | '"'
+                        | '\''
+                        | '「'
+                        | '」'
+                        | '『'
+                        | '』'
+                        | '（'
+                        | '）'
+                        | '、'
+                        | '。'
+                        | '：'
+                        | '；'
+                )
+        });
+        if !looks_like_project_path(candidate) {
+            continue;
+        }
+        if !root.join(candidate).exists() && !paths.iter().any(|p| p == candidate) {
+            paths.push(candidate.to_string());
+        }
+    }
+    paths
+}
+
+fn looks_like_project_path(s: &str) -> bool {
+    if s.starts_with('/')
+        || s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.contains("..")
+        || !s.contains('/')
+    {
+        return false;
+    }
+
+    let Some(file_name) = s.rsplit('/').next() else {
+        return false;
+    };
+    file_name.contains('.') && !file_name.ends_with('.')
 }
 
 fn is_successful_file_update_result(r: &ToolResult) -> bool {
@@ -528,6 +758,13 @@ pub async fn run_agent(
     resume: Option<SessionData>,
 ) -> anyhow::Result<bool> {
     let mut dbg = DebugLogger::new(root, debug);
+    if should_short_circuit_non_actionable_task(user_task, resume.as_ref()) {
+        println!(
+            "{YELLOW}具体的な作業内容を入力してください。保存済みセッションを再開する場合は、同じタスクを再入力してください。{RESET}"
+        );
+        return Ok(true);
+    }
+
     // 未完了の todo があれば冒頭に表示（前回の続きを把握するため）
     let existing_todos = todo_write::load(root);
     let has_pending = existing_todos
@@ -805,6 +1042,32 @@ pub async fn run_agent(
             && tool_results.is_empty()
             && commands.iter().all(|c| matches!(c, AiCommand::Txt { .. }));
 
+        // ask_user 連打の事前ブロック:
+        // consecutive_ask_user >= 1 のときに ask_user を再度実行すると
+        // ユーザーが複数回連続で質問を受けてしまうため、execute() の前にブロックする。
+        if consecutive_ask_user >= 1
+            && !is_done
+            && commands
+                .iter()
+                .any(|c| matches!(c, AiCommand::AskUser { .. }))
+        {
+            consecutive_ask_user += 1;
+            consecutive_txt += 1;
+            let ctx = build_context_header(user_task, &read_files, root, &done_log);
+            prompt = format!(
+                "{ctx}\n\n\
+                [⚠ ask_user を連続で送っています ({consecutive_ask_user}回目)]\
+                \nユーザーの回答が短い・曖昧であっても、再度 ask_user で詳細を聞き返さないでください。\
+                \n手元の情報で最善の判断をして作業を進めてください。\
+                \n判断できないなら `bot` で現状と次のステップ候補を提示してください。\
+                \n```json\
+                \n{{\"type\": \"bot\", \"message\": \"（現状と選択肢）\"}}\
+                \n```"
+            );
+            dbg.turn_end();
+            continue;
+        }
+
         // ツール種別による自動確認スキップ（llm-prompts.md §4）
         // 読み取り系のみ → 確認なし / 破壊的操作あり + !auto_confirm → インライン確認
         let commands = filter_by_permission(commands, auto_confirm).await;
@@ -982,10 +1245,22 @@ pub async fn run_agent(
 
 fn display_result(r: &ToolResult, verbose: bool) {
     if r.label == "ParseError" {
+        // verbose/非verbose 問わず常に表示。出力内容はモードで調整
         if verbose {
+            // 最初の行（エラー概要）だけ抜き出して表示
+            let summary = r
+                .output
+                .lines()
+                .next()
+                .unwrap_or("JSON パース失敗")
+                .chars()
+                .take(120)
+                .collect::<String>();
             println!(
-                "  {RED_BOLD}[ParseError]{RESET} JSON パース失敗 {DIM}(詳細は .copipe_logs/browser_log){RESET}"
+                "  {RED_BOLD}[ParseError]{RESET} {summary} {DIM}(詳細は .copipe_logs/browser_log){RESET}"
             );
+        } else {
+            println!("  {RED_BOLD}[ParseError]{RESET} {DIM}JSON パース失敗、リトライします{RESET}");
         }
     } else if is_error_output(&r.output) {
         // 種別ごとに色分け（llm-prompts.md §3）
@@ -1066,17 +1341,167 @@ mod tests {
     use super::*;
 
     #[test]
+    fn non_actionable_ack_is_detected() {
+        assert!(is_non_actionable_ack("おねがい"));
+        assert!(is_non_actionable_ack("お願い！"));
+        assert!(is_non_actionable_ack("続き"));
+        assert!(is_non_actionable_ack("つづき。"));
+        assert!(is_non_actionable_ack("続けて"));
+        assert!(is_non_actionable_ack("つづけて。"));
+        assert!(is_non_actionable_ack("continue"));
+        assert!(is_non_actionable_ack("OK"));
+        assert!(is_non_actionable_ack(" yes "));
+    }
+
+    #[test]
+    fn menu_selection_without_context_is_detected() {
+        assert!(is_menu_selection_without_context("1"));
+        assert!(is_menu_selection_without_context("1."));
+        assert!(is_menu_selection_without_context("1. codegen"));
+        assert!(is_menu_selection_without_context("2 parser"));
+    }
+
+    #[test]
+    fn concrete_task_is_not_treated_as_ack() {
+        assert!(!is_non_actionable_ack("src の構成を調べて"));
+        assert!(!is_non_actionable_ack("cargo check して修正して"));
+        assert!(!is_non_actionable_ack(
+            "前回のセッションを resume して続けて"
+        ));
+        assert!(!is_menu_selection_without_context(
+            "1. src/main.rs を修正して"
+        ));
+        assert!(!is_menu_selection_without_context("2 parser を実装して"));
+    }
+
+    #[test]
     fn initial_prompt_adds_review_efficiency_hints() {
         let prompt = build_initial_prompt("src/agent/debug_log.rs をレビューして");
 
+        assert!(prompt.contains("## New task boundary"));
         assert!(prompt.contains("空 grep を挟まず直接 read_file"));
         assert!(prompt.contains("具体的な指摘・根拠・改善案"));
     }
 
     #[test]
-    fn initial_prompt_leaves_non_review_tasks_plain() {
+    fn initial_prompt_adds_new_task_boundary_to_non_review_tasks() {
         let task = "cargo check して";
+        let prompt = build_initial_prompt(task);
 
-        assert_eq!(build_initial_prompt(task), task);
+        assert!(prompt.contains("## New task boundary"));
+        assert!(prompt.contains("過去の Copilot チャット文脈"));
+        assert!(prompt.contains("ログは失敗パターンの診断材料"));
+        assert!(prompt.contains("ログ内の作業対象・crate 名・ファイル名・実行結果"));
+        assert!(prompt.ends_with(task));
+    }
+
+    #[test]
+    fn final_answer_referenced_missing_paths_are_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let message =
+            "確認しました。src/main.rs はありますが、src/parser.rs と src/ast.rs も実装済みです。";
+
+        let missing = missing_referenced_project_paths(message, dir.path());
+
+        assert_eq!(missing, vec!["src/parser.rs", "src/ast.rs"]);
+    }
+
+    #[test]
+    fn final_answer_existing_paths_are_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let missing =
+            missing_referenced_project_paths("`src/main.rs` を確認しました。", dir.path());
+
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn initial_prompt_for_ack_asks_for_concrete_task_without_tools() {
+        let prompt = build_initial_prompt("おねがい");
+
+        assert!(prompt.contains("具体的な作業内容がありません"));
+        assert!(prompt.contains("ツールを実行せず"));
+    }
+
+    #[test]
+    fn initial_prompt_for_menu_selection_asks_for_concrete_task_without_tools() {
+        let prompt = build_initial_prompt("1. codegen");
+
+        assert!(prompt.contains("具体的な作業内容がありません"));
+        assert!(prompt.contains("過去の Copilot チャット文脈"));
+        assert!(prompt.contains("ツールを実行せず"));
+    }
+
+    #[test]
+    fn non_actionable_ack_is_short_circuited_without_resume() {
+        assert!(should_short_circuit_non_actionable_task("続けて", None));
+        assert!(should_short_circuit_non_actionable_task("続き", None));
+        assert!(should_short_circuit_non_actionable_task("1. codegen", None));
+    }
+
+    #[test]
+    fn non_actionable_ack_can_continue_when_resume_exists() {
+        let data = SessionData {
+            version: 1,
+            project_dir: ".".to_string(),
+            user_task: "続けて".to_string(),
+            turn_count: 1,
+            saved_at: "now".to_string(),
+            done_log: Vec::new(),
+            read_files: Vec::new(),
+        };
+
+        assert!(!should_short_circuit_non_actionable_task(
+            "続けて",
+            Some(&data)
+        ));
+    }
+
+    #[test]
+    fn recovery_hint_warns_after_missing_read_file() {
+        let results = vec![ToolResult::new(
+            "ReadFile(src/parser.rs)",
+            "ERROR: ファイルが存在しません: 'src/parser.rs'. 同ディレクトリの実在ファイル: main.rs",
+        )];
+
+        let hint = recovery_hint_for_tool_results(&results);
+
+        assert!(hint.contains("存在しないファイルを読もうとしました"));
+        assert!(hint.contains("src/parser.rs"));
+        assert!(hint.contains("推測して回答しないでください"));
+        assert!(hint.contains("実在するファイルだけを根拠"));
+    }
+
+    #[test]
+    fn recovery_hint_suggests_cargo_check_tests_after_blocked_cargo_test() {
+        let results = vec![ToolResult::new(
+            "Cmd(run tests)",
+            "Permission denied: 'cargo test' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です",
+        )];
+
+        let hint = recovery_hint_for_tool_results(&results);
+
+        assert!(hint.contains("cargo test は実行できません"));
+        assert!(hint.contains("[\"cargo\",\"check\",\"--tests\"]"));
+        assert!(hint.contains("実際のテスト実行が必須"));
+    }
+
+    #[test]
+    fn recovery_hint_suggests_mkdir_after_missing_parent_dir() {
+        let results = vec![ToolResult::new(
+            "WriteFile(.github/workflows/rust-ci.yml)",
+            "ERROR: 親ディレクトリが存在しません。先に mkdir で作成し、必要なら list_dir/glob で配置を確認してください: .github/workflows/rust-ci.yml",
+        )];
+
+        let hint = recovery_hint_for_tool_results(&results);
+
+        assert!(hint.contains("親ディレクトリがありません"));
+        assert!(hint.contains("mkdir"));
+        assert!(hint.contains(".github/workflows"));
     }
 }

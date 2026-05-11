@@ -23,6 +23,7 @@ impl DebugLogger {
             // debug_log のみ安全に初期化（truncate）する
             #[cfg(unix)]
             {
+                use std::io::Write;
                 use std::os::unix::fs::OpenOptionsExt;
                 #[cfg(target_os = "linux")]
                 const O_NOFOLLOW: i32 = 0o400000;

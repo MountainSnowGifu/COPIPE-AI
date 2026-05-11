@@ -10,8 +10,7 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     // テキスト処理（awk は system() でシェル実行可、sed は w コマンドで書き込み可のため除外）
     "sort", "uniq", "tr", "cut", "jq",
     // 情報表示（引数ゼロ限定。環境変数表示のみ）
-    "echo", "printf", "date",
-    // Windows: PATH 検索（where.exe）
+    "echo", "printf", "date", // Windows: PATH 検索（where.exe）
     "where",
 ];
 
@@ -99,9 +98,7 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     if basename == "cargo" {
         let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
         if BLOCKED_CARGO_SUBCMDS.contains(&subcmd) {
-            return Err(format!(
-                "Permission denied: 'cargo {subcmd}' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です"
-            ));
+            return Err(blocked_cargo_subcmd_message(subcmd));
         }
         if !ALLOWED_CARGO_SUBCMDS.contains(&subcmd) {
             return Err(format!(
@@ -137,4 +134,44 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn blocked_cargo_subcmd_message(subcmd: &str) -> String {
+    let mut message = format!(
+        "Permission denied: 'cargo {subcmd}' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です"
+    );
+
+    if subcmd == "test" {
+        message.push_str(
+            "。テストコードのコンパイル確認だけなら、代わりに ['cargo','check','--tests'] または ['cargo','check','--all-targets'] を実行してください。実際のテスト実行が必要な場合は bot でその旨を報告してください",
+        );
+    }
+
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocked_cargo_test_suggests_check_tests() {
+        let cmd = vec!["cargo".to_string(), "test".to_string()];
+        let err = check_cmd_safety(&cmd).unwrap_err();
+
+        assert!(err.contains("cargo test"));
+        assert!(err.contains("cargo','check','--tests"));
+        assert!(err.contains("実際のテスト実行が必要な場合"));
+    }
+
+    #[test]
+    fn cargo_check_tests_is_allowed() {
+        let cmd = vec![
+            "cargo".to_string(),
+            "check".to_string(),
+            "--tests".to_string(),
+        ];
+
+        assert!(check_cmd_safety(&cmd).is_ok());
+    }
 }

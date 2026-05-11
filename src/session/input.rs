@@ -1,0 +1,1 @@
+pub(super) const INPUT_SELECTOR: &str = "#userInput, textarea[name='userInput'], textarea[aria-label*='Message'], textarea[aria-label*='message'], textarea[aria-label*='メッセージ'], textarea[placeholder*='Message'], textarea[placeholder*='message'], textarea[placeholder*='メッセージ'], textarea, [contenteditable='true'][role='textbox'], [role='textbox'][contenteditable='true']";

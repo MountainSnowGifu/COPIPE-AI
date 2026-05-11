@@ -29,6 +29,48 @@ pub(super) fn build_context_header(
 
     // 動的部分（毎ターン更新）— system_prompt.md §「動的コンテキストの形式」に準拠
     let mut dynamic_lines: Vec<String> = Vec::new();
+    // 警告は先に収集して先頭に挿入する（AI が見落とさないよう優先表示）
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 同一 Grep パターンの重複実行を検知
+    {
+        let mut grep_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for s in done_log.iter() {
+            // done_log エントリ例: "✓ Grep(IrInst in src)"
+            if let Some(rest) = s.strip_prefix("✓ Grep(") {
+                let key = rest.trim_end_matches(')');
+                *grep_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        if let Some((key, &count)) = grep_counts.iter().find(|&(_, &c)| c >= 2) {
+            warnings.push(format!(
+                "[⚠ 重複 Grep を検知] \"{}\" を既に {count} 回 grep しています。\
+                同じパターンを再度検索する必要はありません。\
+                別のキーワードを使うか、情報が十分なら今すぐ bot で回答してください。",
+                key
+            ));
+        }
+    }
+
+    // read_file 連打を検知 — 直近 done_log の大半が ReadFile なら警告
+    {
+        let recent_reads = done_log
+            .iter()
+            .rev()
+            .take(5)
+            .filter(|s| s.contains("ReadFile("))
+            .count();
+        if recent_reads >= 4 {
+            warnings.push(
+                "[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。\
+                または十分な情報が揃っているなら今すぐ bot で回答してください。".to_string()
+            );
+        }
+    }
+
+    // 警告を先頭に追加
+    dynamic_lines.extend(warnings);
 
     if !read_files.is_empty() {
         dynamic_lines.push(format!(
@@ -49,22 +91,6 @@ pub(super) fn build_context_header(
 
     if !done_log.is_empty() {
         dynamic_lines.push(compact_done_log(done_log));
-    }
-
-    // read_file 連打を検知してグリップ — 直近 done_log の大半が ReadFile なら警告
-    {
-        let recent_reads = done_log
-            .iter()
-            .rev()
-            .take(5)
-            .filter(|s| s.contains("ReadFile("))
-            .count();
-        if recent_reads >= 4 {
-            dynamic_lines.push(
-                "[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。\
-                または十分な情報が揃っているなら今すぐ bot で回答してください。".to_string()
-            );
-        }
     }
 
     if dynamic_lines.is_empty() {

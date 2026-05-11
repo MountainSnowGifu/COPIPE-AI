@@ -1,0 +1,32 @@
+[
+  {
+    "id": "1",
+    "content": "VBA風言語の仕様（文法・型・制御構文）のざっくり設計",
+    "status": "completed"
+  },
+  {
+    "id": "2",
+    "content": "字句解析器（lexer）の設計と実装",
+    "status": "completed"
+  },
+  {
+    "id": "3",
+    "content": "構文解析器（parser）とAST定義の設計と実装",
+    "status": "completed"
+  },
+  {
+    "id": "4",
+    "content": "中間表現(IR)または直接コード生成の方針決定",
+    "status": "completed"
+  },
+  {
+    "id": "5",
+    "content": "コード生成（とりあえず簡単なターゲット：インタプリタ or 仮想マシン）",
+    "status": "completed"
+  },
+  {
+    "id": "6",
+    "content": "CLIエントリポイントからコンパイル処理を呼び出す実装",
+    "status": "completed"
+  }
+]

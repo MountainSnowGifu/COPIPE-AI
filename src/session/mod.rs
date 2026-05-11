@@ -1,5 +1,6 @@
 mod browser;
 mod dom;
+mod input;
 mod page;
 mod watchdog;
 
@@ -7,7 +8,8 @@ use browser::{free_port, launch_edge};
 use chromiumoxide::browser::Browser;
 use dom::{scroll_to_nth_ai_message, scroll_to_selector};
 use futures::StreamExt;
-use page::{get_ws_url, prepare_copilot_page, wait_for_element};
+use input::INPUT_SELECTOR;
+use page::{get_ws_url, prepare_copilot_page, wait_for_input};
 use std::process::Child;
 use std::time::Duration;
 use watchdog::{wait_for_ai_message_count, wait_for_stable_text};
@@ -147,8 +149,8 @@ impl CopilotSession {
         let page = &self.page;
         let baseline = ai_message_count(page).await?;
 
-        wait_for_element(page, "#userInput", 10).await?;
-        scroll_to_selector(page, "#userInput").await;
+        wait_for_input(page, 10).await?;
+        scroll_to_selector(page, INPUT_SELECTOR).await;
         tokio::time::sleep(jitter(700, 500)).await;
 
         // Bézier 曲線軌跡でマウスを入力欄に移動してクリック
@@ -166,87 +168,68 @@ impl CopilotSession {
         .await?;
         tokio::time::sleep(jitter(900, 700)).await;
 
-        // Enter キー（Shift/Alt/Ctrl なし、より自然なイベントオブジェクト）
-        page.evaluate_expression(include_str!("js/send_enter.js"))
-            .await?;
-        tokio::time::sleep(jitter(400, 250)).await;
-
-        // 入力欄がまだ空でなければ送信ボタンをフォールバッククリック（二重送信防止）
+        // 送信: 送信ボタンクリックを優先し、見つからない場合は Enter キーにフォールバック
         let target = baseline + 1;
-        let input_still_has_text = page
-            .evaluate_expression(
-                r#"(document.querySelector('#userInput')?.value?.length ?? 0) > 0"#,
-            )
+        let btn_result = page
+            .evaluate_expression(include_str!("js/send_button.js"))
             .await
             .ok()
-            .and_then(|r| r.value().and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-        if input_still_has_text && ai_message_count(page).await.unwrap_or(0) < target {
-            let click_result = page.evaluate_expression(r#"
-                (function() {
-                    // 優先セレクター（aria-label / testid）
-                    const selectors = [
-                        'button[aria-label*="Send"]', 'button[aria-label*="送信"]',
-                        'button[aria-label*="メッセージ"]', 'button[aria-label*="message"]',
-                        'button[aria-label*="submit"]', 'button[aria-label*="Submit"]',
-                        '[data-testid*="send"]', '[data-testid*="Send"]',
-                        '[data-testid*="submit"]', '[data-testid*="Submit"]',
-                        'button[type="submit"]',
-                    ];
-                    for (const sel of selectors) {
-                        const btn = document.querySelector(sel);
-                        if (btn && !btn.disabled) { btn.click(); return 'clicked:' + sel; }
-                    }
-                    // 入力欄の近くにある有効ボタンを最大3階層上まで探す
-                    const inp = document.querySelector('#userInput');
-                    if (inp) {
-                        let el = inp.parentElement;
-                        for (let depth = 0; el && depth < 5; depth++, el = el.parentElement) {
-                            const btns = [...el.querySelectorAll('button:not([disabled])')];
-                            // 入力欄より右/下にあるボタンを優先
-                            const inpRect = inp.getBoundingClientRect();
-                            for (const btn of btns) {
-                                const r = btn.getBoundingClientRect();
-                                if (r.left >= inpRect.right - 10 || r.top >= inpRect.bottom - 10) {
-                                    btn.click();
-                                    return 'clicked:nearby@' + depth + ':' + (btn.getAttribute('aria-label') || btn.getAttribute('data-testid') || btn.className.slice(0,30) || 'unknown');
-                                }
-                            }
-                        }
-                    }
-                    // 最終手段: form.requestSubmit() または form.submit()
-                    const form = document.querySelector('#userInput')?.closest('form');
-                    if (form) {
-                        try { form.requestSubmit(); return 'form_requestSubmit'; } catch(_) {}
-                        try { form.submit(); return 'form_submit'; } catch(_) {}
-                    }
-                    return 'no button found';
-                })()
-            "#).await.ok()
-                .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-                .unwrap_or_default();
-            // フォールバック詳細はログファイルのみ（端末には出さない）
-            if let Some(ref ld) = self.log_dir {
-                let log_path = ld.join("browser_log");
-                if !log_path
-                    .symlink_metadata()
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-                {
-                    let msg = format!("[送信フォールバック] {click_result}\n---");
-                    tokio::task::spawn_blocking(move || {
-                        use std::io::Write as IoWrite;
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&log_path)
-                        {
-                            let _ = writeln!(f, "{msg}");
-                        }
-                    });
-                }
+            .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())));
+
+        let send_log_msg = if let Some(ref detail) = btn_result {
+            // ボタンクリック成功
+            tokio::time::sleep(jitter(400, 250)).await;
+            format!("[送信:ボタン] {detail}\n---")
+        } else {
+            // ボタンが見つからない場合は Enter キーで試みる
+            page.evaluate_expression(include_str!("js/send_enter.js"))
+                .await?;
+            tokio::time::sleep(jitter(400, 250)).await;
+
+            // 入力欄にテキストが残っていれば最終手段としてボタン再試行
+            let still_text = page
+                .evaluate_expression(
+                    r#"(function() {
+                        const inp = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
+                        if (!inp) return false;
+                        if ('value' in inp) return (inp.value || '').length > 0;
+                        return (inp.innerText || inp.textContent || '').length > 0;
+                    })()"#,
+                )
+                .await
+                .ok()
+                .and_then(|r| r.value().and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            if still_text && ai_message_count(page).await.unwrap_or(0) < target {
+                page.evaluate_expression(include_str!("js/send_button.js"))
+                    .await
+                    .ok();
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                "[送信フォールバック:ボタン再試行]\n---".to_string()
+            } else {
+                "[送信:Enter]\n---".to_string()
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+
+        // 送信方法をログファイルに記録（端末には出さない）
+        if let Some(ref ld) = self.log_dir {
+            let log_path = ld.join("browser_log");
+            if !log_path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                tokio::task::spawn_blocking(move || {
+                    use std::io::Write as IoWrite;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        let _ = writeln!(f, "{send_log_msg}");
+                    }
+                });
+            }
         }
 
         let log_dir_ref = self.log_dir.as_deref();

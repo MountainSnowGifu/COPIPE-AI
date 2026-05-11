@@ -54,16 +54,16 @@ fn hook_rewrite_os_errors(_tool_name: &str, mut result: ToolResult) -> ToolResul
     // よくある OS エラーを日本語に置換
     let rewrites: &[(&str, &str)] = &[
         ("(os error 2)", "（ファイルが見つかりません）"),
-        ("(os error 3)", "（パスが見つかりません）"),      // Windows: ERROR_PATH_NOT_FOUND
-        ("(os error 5)", "（権限がありません）"),           // Windows: ERROR_ACCESS_DENIED
+        ("(os error 3)", "（パスが見つかりません）"), // Windows: ERROR_PATH_NOT_FOUND
+        ("(os error 5)", "（権限がありません）"),     // Windows: ERROR_ACCESS_DENIED
         ("(os error 13)", "（権限がありません）"),
         ("(os error 17)", "（すでに存在します）"),
         ("(os error 28)", "（ディスク容量不足）"),
-        ("(os error 32)", "（ファイルが使用中です）"),     // Windows: ERROR_SHARING_VIOLATION
+        ("(os error 32)", "（ファイルが使用中です）"), // Windows: ERROR_SHARING_VIOLATION
         ("(os error 36)", "（ファイル名が長すぎます）"),
-        ("(os error 112)", "（ディスク容量不足）"),        // Windows: ERROR_DISK_FULL
-        ("(os error 183)", "（すでに存在します）"),        // Windows: ERROR_ALREADY_EXISTS
-        ("(os error 206)", "（ファイル名が長すぎます）"),  // Windows: ERROR_FILENAME_EXCED_RANGE
+        ("(os error 112)", "（ディスク容量不足）"), // Windows: ERROR_DISK_FULL
+        ("(os error 183)", "（すでに存在します）"), // Windows: ERROR_ALREADY_EXISTS
+        ("(os error 206)", "（ファイル名が長すぎます）"), // Windows: ERROR_FILENAME_EXCED_RANGE
     ];
     for (pattern, replacement) in rewrites {
         result.output = result.output.replace(pattern, replacement);

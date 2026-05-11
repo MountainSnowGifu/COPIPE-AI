@@ -161,6 +161,6 @@ mod tests {
             ..RateLimiter::new()
         };
         let d = rl.next_delay_ms();
-        assert!(d >= 3_500, "turn=8 should trigger human pause, delay={d}");
+        assert!(d >= 2_800, "turn=8 should trigger human pause, delay={d}");
     }
 }

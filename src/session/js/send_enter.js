@@ -1,5 +1,5 @@
 (function() {
-    const el = document.querySelector('#userInput');
+    const el = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
     if (!el) return;
 
     const base = {

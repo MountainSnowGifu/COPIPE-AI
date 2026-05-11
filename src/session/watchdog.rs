@@ -66,7 +66,7 @@ fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
 pub(super) async fn detect_copilot_block(page: &chromiumoxide::Page) -> Option<String> {
     let js = r#"
     (() => {
-        const inp = document.querySelector('#userInput');
+        const inp = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
         if (!inp) return 'input_missing';
         if (inp.disabled || inp.getAttribute('aria-disabled') === 'true') return 'input_disabled';
 
@@ -135,7 +135,7 @@ pub(super) async fn wait_for_ai_message_count(
             // 診断情報は root ベースのログファイルのみ（端末には出さない）
             let input_state = page.evaluate_expression(r#"
                 (function() {
-                    const inp = document.querySelector('#userInput');
+                    const inp = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
                     const allBtns = [...document.querySelectorAll('button')].map(b => ({
                         aria: b.getAttribute('aria-label') || null,
                         testid: b.getAttribute('data-testid') || null,
@@ -145,7 +145,7 @@ pub(super) async fn wait_for_ai_message_count(
                     return JSON.stringify({
                         input_exists: !!inp,
                         input_disabled: inp ? inp.disabled : null,
-                        input_value_len: inp ? inp.value.length : 0,
+                        input_value_len: inp ? (('value' in inp ? inp.value : (inp.innerText || inp.textContent || '')).length) : 0,
                         ai_msg_count: document.querySelectorAll('[data-testid="ai-message"]').length,
                         all_btns: allBtns,
                     });

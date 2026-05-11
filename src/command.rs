@@ -131,6 +131,16 @@ pub fn parse_commands(json: &str) -> anyhow::Result<Vec<AiCommand>> {
         if let Ok(cmds) = serde_json::from_value::<Vec<AiCommand>>(normalized.clone()) {
             return Ok(cmds);
         }
+        // 配列の各要素を個別にパース（一部が未知の type でも残りを救済）
+        if let Value::Array(ref items) = normalized {
+            let cmds: Vec<AiCommand> = items
+                .iter()
+                .filter_map(|item| serde_json::from_value::<AiCommand>(item.clone()).ok())
+                .collect();
+            if !cmds.is_empty() {
+                return Ok(cmds);
+            }
+        }
         if let Ok(cmd) = serde_json::from_value::<AiCommand>(normalized) {
             return Ok(vec![cmd]);
         }
