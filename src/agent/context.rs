@@ -61,11 +61,33 @@ pub(super) fn build_context_header(
             .take(5)
             .filter(|s| s.contains("ReadFile("))
             .count();
-        if recent_reads >= 4 {
+        if recent_reads >= 3 {
             warnings.push(
                 "[⚠ 連続 read_file を検知] grep でキーワード検索してから必要なファイルだけ読んでください。\
                 または十分な情報が揃っているなら今すぐ bot で回答してください。".to_string()
             );
+        }
+    }
+
+    // Glob 後に grep なしで read_file を連続使用するパターンを検知
+    // パターン: ✓ Glob(...) の後に Grep なしで 2+ 件の ReadFile → 非効率な探索を警告
+    {
+        let last_glob_pos = done_log.iter().rposition(|s| s.starts_with("✓ Glob("));
+        if let Some(glob_pos) = last_glob_pos {
+            let after_glob = &done_log[glob_pos + 1..];
+            let has_grep_after = after_glob.iter().any(|s| s.contains("Grep("));
+            let read_count_after = after_glob
+                .iter()
+                .filter(|s| s.contains("ReadFile("))
+                .count();
+            if read_count_after >= 2 && !has_grep_after {
+                warnings.push(format!(
+                    "[⚠ Glob 後に連続 read_file を検知 ({read_count_after} 件)] \
+                    ファイル一覧取得後にファイルを順番に読むのは非効率です。\
+                    grep でシンボルや関数名を検索してから必要なファイルだけ read_file してください。\
+                    または十分な情報が揃っているなら今すぐ bot で回答してください。"
+                ));
+            }
         }
     }
 
@@ -311,5 +333,66 @@ mod tests {
         let out = compact_file_list(&files, root);
         assert!(out.contains("(5 ファイル)"));
         assert!(out.contains("10 ファイル"));
+    }
+
+    #[test]
+    fn test_consecutive_read_warns_at_3() {
+        // 3件連続 ReadFile → soft warning が発動する
+        let root = Path::new("/root");
+        let log = vec![
+            "✓ ReadFile(src/a.rs)".to_string(),
+            "✓ ReadFile(src/b.rs)".to_string(),
+            "✓ ReadFile(src/c.rs)".to_string(),
+        ];
+        let out = build_context_header("調査", &HashSet::new(), root, &log);
+        assert!(
+            out.contains("連続 read_file を検知"),
+            "3件で soft warning が出るべき"
+        );
+    }
+
+    #[test]
+    fn test_glob_then_reads_warns_at_2() {
+        // Glob 後に grep なしで 2+ 件の ReadFile → 専用の警告が出る
+        let root = Path::new("/root");
+        let log = vec![
+            "✓ Glob(src/**/*.rs)".to_string(),
+            "✓ ReadFile(src/main.rs)".to_string(),
+            "✓ ReadFile(src/lexer.rs)".to_string(),
+        ];
+        let out = build_context_header("調査", &HashSet::new(), root, &log);
+        assert!(
+            out.contains("Glob 後に連続 read_file"),
+            "glob+2reads で警告が出るべき"
+        );
+    }
+
+    #[test]
+    fn test_glob_then_reads_no_warn_if_grep_used() {
+        // Glob 後に Grep を使っていれば警告しない
+        let root = Path::new("/root");
+        let log = vec![
+            "✓ Glob(src/**/*.rs)".to_string(),
+            "✓ Grep(fn execute in src)".to_string(),
+            "✓ ReadFile(src/main.rs)".to_string(),
+            "✓ ReadFile(src/lexer.rs)".to_string(),
+        ];
+        let out = build_context_header("調査", &HashSet::new(), root, &log);
+        assert!(
+            !out.contains("Glob 後に連続 read_file"),
+            "grep 使用後は警告不要"
+        );
+    }
+
+    #[test]
+    fn test_glob_then_reads_no_warn_if_only_one_read() {
+        // Glob 後の ReadFile が 1件だけなら警告しない
+        let root = Path::new("/root");
+        let log = vec![
+            "✓ Glob(src/**/*.rs)".to_string(),
+            "✓ ReadFile(src/main.rs)".to_string(),
+        ];
+        let out = build_context_header("調査", &HashSet::new(), root, &log);
+        assert!(!out.contains("Glob 後に連続 read_file"), "1件では警告不要");
     }
 }

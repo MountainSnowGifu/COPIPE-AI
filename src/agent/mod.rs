@@ -6,6 +6,7 @@ mod prompt;
 pub mod rate_limiter;
 mod runner;
 pub mod session_store;
+mod task;
 
 pub use prompt::build_system_prompt;
 pub use runner::run_agent;

@@ -383,8 +383,14 @@ fn truncate_tool_entry(entry: &str, max_chars: usize) -> String {
     let continuation_hint = entry
         .rfind("\n[残り ")
         .and_then(|idx| entry[idx..].find("offset_lines").map(|_| &entry[idx..]));
+    let read_file_hint = continuation_hint
+        .is_none()
+        .then(|| read_file_continuation_hint_for_truncated_entry(entry, max_chars))
+        .flatten();
 
-    let tail = continuation_hint.unwrap_or("");
+    let tail = continuation_hint
+        .or(read_file_hint.as_deref())
+        .unwrap_or("");
     let tail_chars = tail.chars().count();
     let note_chars = note.chars().count();
     let reserve = tail_chars + note_chars;
@@ -406,6 +412,34 @@ fn truncate_tool_entry(entry: &str, max_chars: usize) -> String {
     }
 }
 
+fn read_file_continuation_hint_for_truncated_entry(entry: &str, max_chars: usize) -> Option<String> {
+    let (path, base_offset) = read_file_label_from_entry(entry)?;
+    let head: String = entry.chars().take(max_chars).collect();
+    let code_start = head.find("```\n")? + 4;
+    let content_head = &head[code_start..];
+    let shown_lines = content_head.lines().count();
+    if shown_lines == 0 {
+        return None;
+    }
+    let next_offset = base_offset + shown_lines;
+    Some(format!(
+        "\n[続きは {{\"type\":\"read_file\",\"path\":\"{path}\",\"offset_lines\":{next_offset}}} で取得]"
+    ))
+}
+
+fn read_file_label_from_entry(entry: &str) -> Option<(String, usize)> {
+    let label_start = entry.find("ReadFile(")? + "ReadFile(".len();
+    let label_end = entry[label_start..].find(')')? + label_start;
+    let inner = &entry[label_start..label_end];
+    let (path, offset) = match inner.rsplit_once('@') {
+        Some((path, offset)) if offset.chars().all(|c| c.is_ascii_digit()) => {
+            (path, offset.parse().ok()?)
+        }
+        _ => (inner, 0),
+    };
+    Some((path.to_string(), offset))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +458,46 @@ mod tests {
         assert!(formatted.contains("\"offset_lines\":300"));
         assert!(formatted.contains("一部を省略"));
         assert!(!formatted.contains("残り 1 件の結果を省略"));
+    }
+
+    #[test]
+    fn truncated_read_file_entry_adds_continuation_hint() {
+        let output = format!(
+            "```\n{}\n```",
+            (0..2000)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let result = ToolResult::new("ReadFile(src/main.rs)", output);
+
+        let formatted = format_tool_results(&[result]);
+
+        assert!(formatted.contains("一部を省略"));
+        assert!(formatted.contains("\"type\":\"read_file\""));
+        assert!(formatted.contains("\"path\":\"src/main.rs\""));
+        assert!(formatted.contains("\"offset_lines\":"));
+    }
+
+    #[test]
+    fn truncated_offset_read_file_entry_preserves_base_offset() {
+        let output = format!(
+            "```\n{}\n```",
+            (0..2000)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let result = ToolResult::new("ReadFile(src/main.rs@150)", output);
+
+        let formatted = format_tool_results(&[result]);
+
+        let offset = formatted
+            .split("\"offset_lines\":")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .and_then(|s| s.parse::<usize>().ok())
+            .expect("offset_lines should be present");
+        assert!(offset > 150);
     }
 }

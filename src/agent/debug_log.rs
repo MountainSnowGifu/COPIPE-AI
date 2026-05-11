@@ -81,7 +81,7 @@ impl DebugLogger {
         if !self.enabled {
             return;
         }
-        const LIMIT: usize = 8_000;
+        const LIMIT: usize = 20_000;
         let char_count = prompt.chars().count();
         let truncated = if char_count > LIMIT {
             let head: String = prompt.chars().take(LIMIT).collect();

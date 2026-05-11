@@ -4,6 +4,14 @@ use super::log::{write_ai_log, write_browser_log};
 use super::parser::{SCHEMA_HINT, parse_blocks};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{SessionData, SessionStore};
+use super::task::{
+    is_deferring_development_message, is_menu_selection_without_context, is_non_actionable_ack,
+    is_placeholder_review_message, is_read_status_question, is_short_open_ended_development_task,
+    looks_like_project_path, missing_referenced_project_paths,
+    should_short_circuit_non_actionable_task, should_short_circuit_read_status_task,
+    task_mentions_explicit_filename, task_requires_development_action, task_requires_file_update,
+    task_requires_review_output,
+};
 use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET, YELLOW};
 use crate::command::AiCommand;
 use crate::command::TodoStatus;
@@ -175,6 +183,26 @@ fn determine_outcome(
         }
     }
 
+    if is_done
+        && task_requires_development_action(user_task)
+        && !has_successful_file_update
+        && bot_message
+            .map(is_deferring_development_message)
+            .unwrap_or(false)
+    {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ 開発タスクを質問だけで終了しようとしています]\n\
+                この依頼は実装・修正・改善系のタスクです。方向性が完全に指定されていなくても、\
+                現在の作業ディレクトリに実在するファイルを根拠に、最小で保守的な改善を1つ選んで進めてください。\
+                ログ内のファイル名や crate 名は現在の事実として扱わないでください。\
+                必要なら `glob` / `grep` で対象を絞り、実装後に `cargo check` してください。\n\
+                ```json\n{{\"type\":\"glob\",\"pattern\":\"src/**/*.rs\"}}\n```"
+            ),
+        };
+    }
+
     // ask_user 連打（2回以上）検知 → 手元の情報で進むよう誘導
     if consecutive_ask_user >= 2 && !is_done {
         return TurnOutcome::NudgeForJson {
@@ -228,8 +256,10 @@ fn determine_outcome(
         };
     }
 
-    // read_file 連打（4件以上）で grep/bot への誘導
-    if consecutive_read_file >= 4 && !is_done {
+    // read_file 連打（3件以上）で grep/bot への誘導
+    // context.rs のソフト警告（recent_reads >= 3）と閾値を合わせ、
+    // ソフト警告を無視してもう1ファイル読んだ時点ですぐハードnudgeを返す
+    if consecutive_read_file >= 3 && !is_done {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
                 "{ctx}\n\n\
@@ -415,197 +445,32 @@ fn build_initial_prompt(user_task: &str) -> String {
         );
     }
 
-    format!("{boundary}{user_task}")
-}
-
-fn is_non_actionable_ack(task: &str) -> bool {
-    let normalized = task
-        .trim()
-        .trim_matches(|c: char| {
-            c.is_ascii_punctuation()
-                || c.is_whitespace()
-                || matches!(c, '。' | '、' | '！' | '？' | '!' | '?')
-        })
-        .to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "お願い"
-            | "おねがい"
-            | "頼む"
-            | "よろしく"
-            | "続き"
-            | "つづき"
-            | "続けて"
-            | "つづけて"
-            | "はい"
-            | "うん"
-            | "ok"
-            | "okay"
-            | "continue"
-            | "yes"
-            | "y"
-            | "go"
-    )
-}
-
-fn is_menu_selection_without_context(task: &str) -> bool {
-    let normalized = task.trim().trim_matches(|c: char| {
-        c.is_ascii_punctuation()
-            || c.is_whitespace()
-            || matches!(c, '。' | '、' | '！' | '？' | '!' | '?' | '．')
-    });
-
-    if normalized.chars().all(|c| c.is_ascii_digit()) {
-        return !normalized.is_empty();
+    if is_short_open_ended_development_task(user_task) {
+        return format!(
+            "{boundary}{user_task}\n\n\
+            [短い開発依頼への進め方]\n\
+            依頼が抽象的でも、具体化質問やプレーンテキスト回答で止めないでください。\
+            まず現在の作業ディレクトリに実在するファイルを確認し、そこから実装対象を絞ってください。\
+            調査後に候補だけを並べてユーザーへ方向性を聞かず、最小で保守的な改善を1つ選んで実装してください。\
+            最初の返答は必ず次の形の JSON コードブロックにしてください:\n\
+            ```json\n\
+            [\n\
+              {{\"type\":\"txt\",\"content\":\"短い依頼なので、まず現在のプロジェクト構成を確認します\"}},\n\
+              {{\"type\":\"glob\",\"pattern\":\"src/**/*.rs\"}}\n\
+            ]\n\
+            ```"
+        );
     }
 
-    let mut parts = normalized.split_whitespace();
-    let Some(first) = parts.next() else {
-        return false;
+    let next_action_hint = if task_mentions_explicit_filename(user_task) {
+        "次のアクションを必ず ```json コードブロックで返してください。\
+        依頼文にファイル名が明示されている場合は、glob を省略して直接 `read_file` でファイルを確認してください。"
+    } else {
+        "次のアクションを必ず ```json コードブロックで返してください。\
+        まだ対象ファイルが不明な場合は、まず `txt` と `glob` で現在のプロジェクト構成を確認してください。"
     };
-    let rest = parts.collect::<Vec<_>>().join(" ");
-    let first = first
-        .trim_end_matches(|c: char| c.is_ascii_punctuation() || matches!(c, '。' | '、' | '．'));
 
-    first.chars().all(|c| c.is_ascii_digit())
-        && !rest.is_empty()
-        && rest.chars().count() <= 32
-        && !rest.contains("して")
-        && !rest.contains("修正")
-        && !rest.contains("実装")
-        && !rest.contains("追加")
-        && !rest.contains("調査")
-        && !rest.contains("レビュー")
-        && !rest.to_ascii_lowercase().contains("fix")
-        && !rest.to_ascii_lowercase().contains("implement")
-}
-
-fn should_short_circuit_non_actionable_task(task: &str, resume: Option<&SessionData>) -> bool {
-    resume.is_none() && (is_non_actionable_ack(task) || is_menu_selection_without_context(task))
-}
-
-fn task_requires_file_update(task: &str) -> bool {
-    let has_file_like_target = task.contains(".txt")
-        || task.contains(".md")
-        || task.contains(".rs")
-        || task.contains("ファイル");
-    let asks_update = task.contains("書き換")
-        || task.contains("書換")
-        || task.contains("翻訳")
-        || task.contains("英語")
-        || task.contains("日本語")
-        || task.contains("更新")
-        || task.contains("修正")
-        || task.contains("変換");
-    has_file_like_target && asks_update
-}
-
-fn task_requires_review_output(task: &str) -> bool {
-    let lower = task.to_ascii_lowercase();
-    let explicit_review = task.contains("レビュー")
-        || lower.contains("review")
-        || task.contains("総括")
-        || task.contains("問題点")
-        || task.contains("調査")
-        || task.contains("分析")
-        || task.contains("チェック")
-        || task.contains("調べ")
-        || lower.contains("analyz")
-        || lower.contains("inspect");
-
-    if lower.contains("cargo check") && !explicit_review {
-        return false;
-    }
-
-    explicit_review || lower.contains("check")
-}
-
-fn is_placeholder_review_message(message: &str) -> bool {
-    let m = message.trim();
-    if m.chars().count() < 500 {
-        return true;
-    }
-    let placeholder_phrases = [
-        "次は",
-        "次に",
-        "これから",
-        "以下に",
-        "返します",
-        "まとめます",
-        "準備が整",
-        "読み込みが完了",
-        "作業ステップ",
-    ];
-    let placeholder_hits = placeholder_phrases
-        .iter()
-        .filter(|p| m.contains(**p))
-        .count();
-    let concrete_markers = [
-        "問題",
-        "原因",
-        "改善",
-        "リスク",
-        "修正",
-        "src/",
-        ".rs",
-        "line",
-        "行",
-        "Permission",
-        "ERROR",
-    ];
-    let concrete_hits = concrete_markers.iter().filter(|p| m.contains(**p)).count();
-    placeholder_hits >= 2 && concrete_hits < 3
-}
-
-fn missing_referenced_project_paths(message: &str, root: &Path) -> Vec<String> {
-    let mut paths = Vec::new();
-    for token in message.split_whitespace() {
-        let Some(start) = token.find(|c: char| c.is_ascii_alphanumeric() || c == '.') else {
-            continue;
-        };
-        let candidate = token[start..].trim_matches(|c: char| {
-            c.is_ascii_punctuation()
-                || c.is_whitespace()
-                || matches!(
-                    c,
-                    '`' | '"'
-                        | '\''
-                        | '「'
-                        | '」'
-                        | '『'
-                        | '』'
-                        | '（'
-                        | '）'
-                        | '、'
-                        | '。'
-                        | '：'
-                        | '；'
-                )
-        });
-        if !looks_like_project_path(candidate) {
-            continue;
-        }
-        if !root.join(candidate).exists() && !paths.iter().any(|p| p == candidate) {
-            paths.push(candidate.to_string());
-        }
-    }
-    paths
-}
-
-fn looks_like_project_path(s: &str) -> bool {
-    if s.starts_with('/')
-        || s.starts_with("http://")
-        || s.starts_with("https://")
-        || s.contains("..")
-        || !s.contains('/')
-    {
-        return false;
-    }
-
-    let Some(file_name) = s.rsplit('/').next() else {
-        return false;
-    };
-    file_name.contains('.') && !file_name.ends_with('.')
+    format!("{boundary}{user_task}\n\n{next_action_hint}")
 }
 
 fn is_successful_file_update_result(r: &ToolResult) -> bool {
@@ -761,6 +626,12 @@ pub async fn run_agent(
     if should_short_circuit_non_actionable_task(user_task, resume.as_ref()) {
         println!(
             "{YELLOW}具体的な作業内容を入力してください。保存済みセッションを再開する場合は、同じタスクを再入力してください。{RESET}"
+        );
+        return Ok(true);
+    }
+    if should_short_circuit_read_status_task(user_task, resume.as_ref()) {
+        println!(
+            "{YELLOW}この新規タスクでは、まだファイル本文は読み込んでいません。読んで要約・確認する場合は、その作業内容を入力してください。{RESET}"
         );
         return Ok(true);
     }
@@ -1097,6 +968,7 @@ pub async fn run_agent(
 
         // read_file 連打カウント更新
         // Txt コマンドが混在しても read_file があれば加算する（以前は all() のため Txt 混在で誤リセットされていた）
+        // Glob / ListDir は「構造探索」であり作業進捗とは見なさない（Grep は対象検索なので進捗扱い）
         let read_file_count = commands
             .iter()
             .filter(|c| matches!(c, AiCommand::ReadFile { .. }))
@@ -1105,7 +977,6 @@ pub async fn run_agent(
             matches!(
                 c,
                 AiCommand::Grep { .. }
-                    | AiCommand::Glob { .. }
                     | AiCommand::Bot { .. }
                     | AiCommand::File { .. }
                     | AiCommand::Edit { .. }
@@ -1339,6 +1210,8 @@ fn print_summary(done_log: &[String], reached_max: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // task.rs に移動したタスク分類関数をテストスコープへ
+    use super::super::task::*;
 
     #[test]
     fn non_actionable_ack_is_detected() {
@@ -1392,7 +1265,69 @@ mod tests {
         assert!(prompt.contains("過去の Copilot チャット文脈"));
         assert!(prompt.contains("ログは失敗パターンの診断材料"));
         assert!(prompt.contains("ログ内の作業対象・crate 名・ファイル名・実行結果"));
-        assert!(prompt.ends_with(task));
+        assert!(prompt.contains(task));
+        assert!(prompt.contains("```json コードブロック"));
+    }
+
+    #[test]
+    fn initial_prompt_bootstraps_short_open_ended_development_tasks() {
+        let prompt = build_initial_prompt("IRの拡張");
+
+        assert!(prompt.contains("短い開発依頼への進め方"));
+        assert!(prompt.contains("\"type\":\"txt\""));
+        assert!(prompt.contains("\"type\":\"glob\""));
+        assert!(prompt.contains("\"pattern\":\"src/**/*.rs\""));
+        assert!(prompt.contains("具体化質問やプレーンテキスト回答で止めない"));
+        assert!(prompt.contains("最小で保守的な改善を1つ選んで実装"));
+    }
+
+    #[test]
+    fn short_open_ended_development_task_detection_is_scoped() {
+        assert!(is_short_open_ended_development_task("IRの拡張"));
+        assert!(is_short_open_ended_development_task("UI改善"));
+        assert!(!is_short_open_ended_development_task("cargo check して"));
+        assert!(!is_short_open_ended_development_task(
+            "src/agent/runner.rs を修正"
+        ));
+    }
+
+    #[test]
+    fn development_task_deferral_is_nudged_to_act() {
+        let dir = tempfile::tempdir().unwrap();
+        let message = "codegen.rs の内容を確認しました。IR 拡張の次の具体的アクションを提案できますので、どの方向に拡張したいか指示してください。";
+
+        let outcome = determine_outcome(
+            "IRの拡張",
+            Some(message),
+            true,
+            false,
+            &[],
+            0,
+            "CTX",
+            0,
+            &HashSet::new(),
+            dir.path(),
+            false,
+            0,
+            0,
+            0,
+            "",
+        );
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("開発タスクを質問だけで終了"));
+                assert!(prompt.contains("ログ内のファイル名や crate 名"));
+            }
+            other => panic!("expected nudge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completed_development_message_is_not_treated_as_deferral() {
+        let message = "src/agent/runner.rs を修正しました。cargo check も成功しています。";
+
+        assert!(!is_deferring_development_message(message));
     }
 
     #[test]
@@ -1463,6 +1398,46 @@ mod tests {
     }
 
     #[test]
+    fn read_status_question_is_short_circuited_without_resume() {
+        assert!(is_read_status_question("小説全部読みましたか？"));
+        assert!(is_read_status_question("小説.md をすべて読んだか確認"));
+        assert!(is_read_status_question("README.md を読み込んだか確認"));
+        assert!(is_read_status_question("README.md は読み込み済み？"));
+        assert!(should_short_circuit_read_status_task(
+            "小説全部読みましたか？",
+            None
+        ));
+    }
+
+    #[test]
+    fn read_request_is_not_treated_as_status_question() {
+        assert!(!is_read_status_question("小説.md を読んで要約して"));
+        assert!(!is_read_status_question("src/main.rs を確認して"));
+        assert!(!should_short_circuit_read_status_task(
+            "小説.md を読んで要約して",
+            None
+        ));
+    }
+
+    #[test]
+    fn read_status_question_can_continue_when_resume_exists() {
+        let data = SessionData {
+            version: 1,
+            project_dir: ".".to_string(),
+            user_task: "小説.md を読んで".to_string(),
+            turn_count: 1,
+            saved_at: "now".to_string(),
+            done_log: vec!["✓ ReadFile(小説.md)".to_string()],
+            read_files: vec!["小説.md".to_string()],
+        };
+
+        assert!(!should_short_circuit_read_status_task(
+            "小説全部読みましたか？",
+            Some(&data)
+        ));
+    }
+
+    #[test]
     fn recovery_hint_warns_after_missing_read_file() {
         let results = vec![ToolResult::new(
             "ReadFile(src/parser.rs)",
@@ -1503,5 +1478,62 @@ mod tests {
         assert!(hint.contains("親ディレクトリがありません"));
         assert!(hint.contains("mkdir"));
         assert!(hint.contains(".github/workflows"));
+    }
+
+    #[test]
+    fn consecutive_read_file_3_triggers_nudge() {
+        let dir = tempfile::tempdir().unwrap();
+        // 3件連続 read_file → NudgeForJson が発動する
+        let outcome = determine_outcome(
+            "調査",
+            None,
+            false,
+            false,
+            &[ToolResult::new("ReadFile(src/c.rs)", "content")],
+            1,
+            "CTX",
+            0,
+            &HashSet::new(),
+            dir.path(),
+            false,
+            3, // consecutive_read_file
+            0,
+            0,
+            "",
+        );
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("連続 read_file が 3 件に達しました"));
+                assert!(prompt.contains("grep"));
+            }
+            other => panic!("expected NudgeForJson, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consecutive_read_file_2_does_not_trigger_nudge() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2件では NudgeForJson は発動しない（Continue になる）
+        let outcome = determine_outcome(
+            "調査",
+            None,
+            false,
+            false,
+            &[ToolResult::new("ReadFile(src/b.rs)", "content")],
+            1,
+            "CTX",
+            0,
+            &HashSet::new(),
+            dir.path(),
+            false,
+            2, // consecutive_read_file
+            0,
+            0,
+            "",
+        );
+        assert!(
+            matches!(outcome, TurnOutcome::Continue { .. }),
+            "2件では nudge しないはず: {outcome:?}"
+        );
     }
 }
