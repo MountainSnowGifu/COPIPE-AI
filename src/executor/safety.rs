@@ -1,6 +1,11 @@
 /// 実行を許可するコマンド名（allowlist 方式）
 /// mv / cp / touch は file/patch/mkdir で代替できるため除外
 /// env / make はサブコマンド経由で任意実行になり得るため除外
+///
+/// 注意（Windows）: cat / head / tail / grep / find / ls / wc / diff / file /
+/// sort / uniq / tr / cut は Windows に標準では存在しない。
+/// Git for Windows または busybox をインストールしている環境では使用可能。
+/// それ以外の環境では実行時 NotFound エラーになる（クラッシュはしない）。
 pub const ALLOWED_EXECUTABLES: &[&str] = &[
     // Rust toolchain（サブコマンドは ALLOWED_CARGO_SUBCMDS で制限）
     "cargo", "rustc", "rustfmt",
@@ -9,12 +14,16 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     // Node.js / TypeScript toolchain（node/npx はスクリプト直接実行のため除外。npm はサブコマンドを制限）
     "tsc", "eslint", "prettier", "npm",
     // バージョン管理（読み取り系のみ。書き込み系は ALLOWED_GIT_SUBCMDS で制限）
-    "git", // ファイル閲覧・検索（書き込みなし）
+    "git",
+    // ファイル閲覧・検索（書き込みなし）
+    // ※ Windows では Git for Windows / busybox 経由でのみ使用可能
     "cat", "head", "tail", "grep", "rg", "find", "ls", "wc", "diff", "file",
     // テキスト処理（awk は system() でシェル実行可、sed は w コマンドで書き込み可のため除外）
+    // ※ Windows では Git for Windows / busybox 経由でのみ使用可能
     "sort", "uniq", "tr", "cut", "jq",
     // 情報表示（引数ゼロ限定。環境変数表示のみ）
-    "echo", "printf", "date", // Windows: PATH 検索（where.exe）
+    "echo", "printf", "date",
+    // Windows: PATH 検索（where.exe）
     "where",
 ];
 
@@ -242,8 +251,7 @@ pub fn check_file_args_within_root(
     if NO_FILE_ARG_CMDS.contains(&exe) {
         return Ok(());
     }
-    let root_canonical = root
-        .canonicalize()
+    let root_canonical = crate::paths::canonicalize_clean(root)
         .map_err(|e| format!("Permission denied: root の解決失敗: {e}"))?;
     for arg in &cmd[1..] {
         // フラグ・空文字はスキップ
@@ -256,7 +264,7 @@ pub fn check_file_args_within_root(
         }
         let candidate = workdir.join(arg);
         if candidate.exists() {
-            match candidate.canonicalize() {
+            match crate::paths::canonicalize_clean(&candidate) {
                 Ok(canonical) => {
                     if !canonical.starts_with(&root_canonical) {
                         return Err(format!(
@@ -320,6 +328,8 @@ mod tests {
         assert!(check_cmd_safety(&cmd).is_err());
     }
 
+    // シンボリックリンクは Unix 固有の仕組みのため、関連テストを unix のみに制限する
+    #[cfg(unix)]
     fn make_symlink_outside_root() -> (tempfile::TempDir, tempfile::NamedTempFile) {
         let dir = tempfile::tempdir().unwrap();
         let target = tempfile::NamedTempFile::new().unwrap();
@@ -328,6 +338,7 @@ mod tests {
         (dir, target)
     }
 
+    #[cfg(unix)]
     #[test]
     fn check_file_args_blocks_symlink_outside_root_for_cat() {
         let (dir, _target) = make_symlink_outside_root();
@@ -338,6 +349,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn check_file_args_blocks_symlink_outside_root_for_sort() {
         let (dir, _target) = make_symlink_outside_root();
@@ -348,6 +360,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn check_file_args_blocks_symlink_outside_root_for_cut() {
         let (dir, _target) = make_symlink_outside_root();

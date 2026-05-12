@@ -3,6 +3,7 @@
 /// --debug フラグ有効時に .copipe_logs/debug_log へ書き込む。
 /// 各ターンの送信プロンプト全文・処理時間・レートリミッタ状態・セッション状態を記録する。
 use crate::executor::{LOG_DIR, now_timestamp, safe_append_log};
+use crate::{command::AiCommand, executor::ToolResult};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -60,6 +61,21 @@ impl DebugLogger {
         }
         let path = self.root.join(LOG_DIR).join("debug_log");
         safe_append_log(&path, content);
+    }
+
+    /// フリーズ切り分け用の軽量イベントログ。
+    ///
+    /// 重い DOM 診断は browser_log 側に任せ、ここでは「どの段階まで進んだか」を残す。
+    pub fn log_event(&self, phase: &str, detail: impl AsRef<str>) {
+        if !self.enabled {
+            return;
+        }
+        self.write(&format!(
+            "[EVENT] {} phase={} {}\n",
+            now_timestamp(),
+            phase,
+            detail.as_ref()
+        ));
     }
 
     /// ターン開始を記録してタイマー開始
@@ -140,6 +156,58 @@ impl DebugLogger {
         ));
     }
 
+    /// AI から返ったコマンドの概要を記録する。
+    pub fn log_commands(&self, commands: &[AiCommand], parse_errors: &[String]) {
+        if !self.enabled {
+            return;
+        }
+        let summary = commands
+            .iter()
+            .map(command_label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.write(&format!(
+            "[COMMANDS] count={} parse_errors={} [{}]\n",
+            commands.len(),
+            parse_errors.len(),
+            summary
+        ));
+        for err in parse_errors.iter().take(3) {
+            self.write(&format!("[PARSE_ERROR] {}\n", one_line(err, 500)));
+        }
+    }
+
+    /// ツール実行結果の概要を記録する。
+    pub fn log_tool_results(&self, results: &[ToolResult]) {
+        if !self.enabled {
+            return;
+        }
+        self.write(&format!("[TOOL_RESULTS] count={}\n", results.len()));
+        for r in results {
+            let status = if crate::executor::errors::is_error_output(&r.output) {
+                "error"
+            } else {
+                "ok"
+            };
+            self.write(&format!(
+                "  [RESULT] #{} {} status={} bytes={} first_line={}\n",
+                r.cmd_index,
+                r.label,
+                status,
+                r.output.len(),
+                one_line(&r.output, 300)
+            ));
+        }
+    }
+
+    /// 次のループ状態を記録する。
+    pub fn log_outcome(&self, outcome: &str) {
+        if !self.enabled {
+            return;
+        }
+        self.write(&format!("[OUTCOME] {outcome}\n"));
+    }
+
     /// ターン終了（処理時間を記録）
     pub fn turn_end(&mut self) {
         if !self.enabled {
@@ -166,4 +234,71 @@ impl DebugLogger {
     pub fn enabled(&self) -> bool {
         self.enabled
     }
+}
+
+fn command_label(cmd: &AiCommand) -> String {
+    match cmd {
+        AiCommand::ReadFile { path, offset_lines } => {
+            if *offset_lines > 0 {
+                format!("read_file:{path}@{offset_lines}")
+            } else {
+                format!("read_file:{path}")
+            }
+        }
+        AiCommand::ListDir { path } => format!("list_dir:{path}"),
+        AiCommand::Grep { pattern, path, .. } => format!("grep:{pattern} in {path}"),
+        AiCommand::Glob { pattern } => format!("glob:{pattern}"),
+        AiCommand::Edit { path, .. } => format!("edit:{path}"),
+        AiCommand::MultiEdit { path, edits } => format!("multi_edit:{path}({})", edits.len()),
+        AiCommand::Patch { path, .. } => format!("patch:{path}"),
+        AiCommand::File { path, content } => format!("write_file:{path}({} bytes)", content.len()),
+        AiCommand::DeleteFile { path } => format!("delete_file:{path}"),
+        AiCommand::DeleteFolder { path } => format!("delete_folder:{path}"),
+        AiCommand::Mkdir { path } => format!("mkdir:{path}"),
+        AiCommand::Cmd {
+            name, cmd, timeout, ..
+        } => {
+            format!("cmd:{name} [{}] timeout={}s", cmd.join(" "), timeout)
+        }
+        AiCommand::AskUser { .. } => "ask_user".to_string(),
+        AiCommand::TodoWrite { todos } => format!("todo_write({})", todos.len()),
+        AiCommand::ReadLog {
+            filename,
+            offset_lines,
+        } => {
+            if *offset_lines > 0 {
+                format!("read_log:{filename}@{offset_lines}")
+            } else {
+                format!("read_log:{filename}")
+            }
+        }
+        AiCommand::WebFetch { url, .. } => format!("web_fetch:{url}"),
+        AiCommand::EnterWorktree => "enter_worktree".to_string(),
+        AiCommand::ExitWorktree { action, .. } => format!("exit_worktree:{action}"),
+        AiCommand::Txt { content } => format!("txt({} chars)", content.chars().count()),
+        AiCommand::Bot { message, content } => format!(
+            "bot({} chars)",
+            message
+                .as_deref()
+                .or(content.as_deref())
+                .unwrap_or("")
+                .chars()
+                .count()
+        ),
+        AiCommand::Error { .. } => "error".to_string(),
+    }
+}
+
+fn one_line(text: &str, limit: usize) -> String {
+    let normalized = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    let mut out: String = normalized.chars().take(limit).collect();
+    if normalized.chars().count() > limit {
+        out.push_str("...");
+    }
+    out
 }

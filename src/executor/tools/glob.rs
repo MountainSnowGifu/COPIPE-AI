@@ -1,8 +1,17 @@
-use crate::executor::ToolResult;
 use crate::executor::context::ToolContext;
+use crate::executor::ToolResult;
 use std::path::{Path, PathBuf};
 
 const MAX_RESULTS: usize = 500;
+const DEFAULT_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".copipe_checkpoints",
+    ".copipe_logs",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+];
 
 /// ワイルドカードパターンでファイルを再帰検索する
 ///
@@ -62,7 +71,8 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
     };
 
     let mut results: Vec<PathBuf> = Vec::new();
-    walk(&base, &[], &pattern_parts, ctx.root, &mut results);
+    let allow_ignored = explicitly_targets_ignored_dir(&base_str);
+    walk(&base, &pattern_parts, ctx.root, allow_ignored, &mut results);
     results.sort();
 
     let truncated = results.len() > MAX_RESULTS;
@@ -93,6 +103,11 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
             pattern
         ));
     }
+    if !allow_ignored {
+        output.push_str(
+            "\n[注: target, node_modules, .git, .copipe_logs などの生成物・内部ディレクトリは除外しました]",
+        );
+    }
 
     ToolResult::new(format!("Glob({pattern})"), output)
 }
@@ -103,9 +118,9 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
 /// `pattern_parts` の残りに一致するパスを収集する
 fn walk(
     current: &Path,
-    walked: &[&str],        // current までに消費したパターン部分
     pattern_parts: &[&str], // まだ消費していないパターン部分
     root: &Path,
+    allow_ignored: bool,
     results: &mut Vec<PathBuf>,
 ) {
     if results.len() >= MAX_RESULTS {
@@ -114,7 +129,9 @@ fn walk(
 
     // パターンが空 → current 自体がマッチ
     if pattern_parts.is_empty() {
-        results.push(current.to_path_buf());
+        if current.is_file() {
+            results.push(current.to_path_buf());
+        }
         return;
     }
 
@@ -123,15 +140,18 @@ fn walk(
     if *head == "**" {
         // ** はゼロ以上のコンポーネントに一致
         // 1. ゼロ消費: tail で current を照合
-        walk(current, walked, tail, root, results);
+        walk(current, tail, root, allow_ignored, results);
         // 2. 一以上消費: current の子ディレクトリへ再帰
         if let Ok(entries) = std::fs::read_dir(current) {
             let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 let path = entry.path();
-                if path.is_dir() && !is_hidden(&path) && is_inside_root(&path, root) {
-                    walk(&path, walked, pattern_parts, root, results);
+                if path.is_dir()
+                    && !is_pruned_dir(&path, root, allow_ignored)
+                    && is_inside_root(&path, root)
+                {
+                    walk(&path, pattern_parts, root, allow_ignored, results);
                 }
             }
         }
@@ -153,12 +173,15 @@ fn walk(
             }
             if tail.is_empty() {
                 // パターンを消費しきった → マッチ
-                if is_inside_root(&path, root) {
+                if path.is_file() && is_inside_root(&path, root) {
                     results.push(path);
                 }
-            } else if path.is_dir() && !is_hidden(&path) && is_inside_root(&path, root) {
+            } else if path.is_dir()
+                && !is_pruned_dir(&path, root, allow_ignored)
+                && is_inside_root(&path, root)
+            {
                 // まだパターンが残っている → 子ディレクトリへ
-                walk(&path, walked, tail, root, results);
+                walk(&path, tail, root, allow_ignored, results);
             }
         }
     }
@@ -217,6 +240,34 @@ fn is_hidden(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .map(|n| n.starts_with('.'))
         .unwrap_or(false)
+}
+
+fn is_pruned_dir(path: &Path, root: &Path, allow_ignored: bool) -> bool {
+    if allow_ignored {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if is_hidden(path) {
+        return true;
+    }
+    if DEFAULT_IGNORED_DIRS.contains(&name) {
+        return true;
+    }
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .is_some_and(|first| DEFAULT_IGNORED_DIRS.contains(&first))
+}
+
+fn explicitly_targets_ignored_dir(base_str: &str) -> bool {
+    let first = base_str
+        .split(is_path_separator)
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    DEFAULT_IGNORED_DIRS.contains(&first)
 }
 
 fn is_inside_root(path: &Path, root: &Path) -> bool {
@@ -329,5 +380,40 @@ mod tests {
 
         assert!(result.output.contains("src/agent/mod.rs"));
         assert!(!result.output.contains(r"src\agent\mod.rs"));
+    }
+
+    #[test]
+    fn broad_glob_skips_generated_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("target/debug/generated.rs"), "").unwrap();
+
+        let mut read_files = std::collections::HashSet::new();
+        let mut checkpoints = crate::executor::CheckpointManager::new(dir.path());
+        let ctx = crate::executor::ToolContext::new(dir.path(), &mut read_files, &mut checkpoints);
+
+        let result = handle(&ctx, "**/*");
+
+        assert!(result.output.contains("src/main.rs"));
+        assert!(!result.output.contains("target/debug/generated.rs"));
+        assert!(result.output.contains("生成物・内部ディレクトリは除外"));
+    }
+
+    #[test]
+    fn explicit_glob_can_search_generated_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join("target/debug/generated.rs"), "").unwrap();
+
+        let mut read_files = std::collections::HashSet::new();
+        let mut checkpoints = crate::executor::CheckpointManager::new(dir.path());
+        let ctx = crate::executor::ToolContext::new(dir.path(), &mut read_files, &mut checkpoints);
+
+        let result = handle(&ctx, "target/**/*.rs");
+
+        assert!(result.output.contains("target/debug/generated.rs"));
+        assert!(!result.output.contains("生成物・内部ディレクトリは除外"));
     }
 }

@@ -1,5 +1,22 @@
 use std::path::{Path, PathBuf};
 
+/// `canonicalize()` を呼び、Windows の `\\?\` 拡張パスプレフィックスを除去する。
+///
+/// `main.rs` の `canonicalize_clean` と同じ処理を共通化したもの。
+/// `ctx.resolve()` 内で `canonicalize()` を呼ぶと Windows では `\\?\C:\...` 形式が
+/// 返ることがあり、clean な root（`\\?\` なし）との `strip_prefix` が失敗する。
+pub fn canonicalize_clean(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    #[cfg(target_os = "windows")]
+    {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(canonical)
+}
+
 pub fn home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(home));

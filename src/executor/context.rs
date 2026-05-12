@@ -36,15 +36,14 @@ impl<'a> ToolContext<'a> {
             return Err(perm_denied(format!("'..' を含むパス '{raw}' は使えません")));
         }
 
-        let root_canonical = self
-            .root
-            .canonicalize()
+        // canonicalize_clean を使うことで Windows の \\?\ 拡張プレフィックスを除去し、
+        // clean な root との strip_prefix が正しく機能するようにする
+        let root_canonical = crate::paths::canonicalize_clean(self.root)
             .map_err(|e| tool_error(format!("root の解決に失敗: {e}")))?;
         let joined = root_canonical.join(raw_path);
 
         if joined.exists() {
-            let canonical = joined
-                .canonicalize()
+            let canonical = crate::paths::canonicalize_clean(&joined)
                 .map_err(|e| tool_error(format!("パスの解決に失敗: {e}")))?;
             if !canonical.starts_with(&root_canonical) {
                 return Err(perm_denied(format!(

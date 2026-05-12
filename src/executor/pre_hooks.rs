@@ -49,7 +49,7 @@ pub enum PreHookOutcome {
     Block(String),
 }
 
-type PreHookFn = fn(&str, &AiCommand) -> PreHookOutcome;
+type PreHookFn = fn(&str, &AiCommand, &std::path::Path) -> PreHookOutcome;
 
 /// 適用する hook の順序リスト
 const PRE_HOOKS: &[PreHookFn] = &[
@@ -59,9 +59,9 @@ const PRE_HOOKS: &[PreHookFn] = &[
 ];
 
 /// すべての PreToolUse hook を順番に適用する
-pub fn run(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
+pub fn run(tool_name: &str, cmd: &AiCommand, root: &std::path::Path) -> PreHookOutcome {
     for hook in PRE_HOOKS {
-        match hook(tool_name, cmd) {
+        match hook(tool_name, cmd, root) {
             PreHookOutcome::Continue => {}
             blocked => return blocked,
         }
@@ -72,7 +72,7 @@ pub fn run(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
 // ─── Hook 実装 ────────────────────────────────────────────────────────────────
 
 /// 実行前にユーザーへ何をするか通知する（verbose 向け情報）
-fn hook_log_action(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
+fn hook_log_action(tool_name: &str, cmd: &AiCommand, _root: &std::path::Path) -> PreHookOutcome {
     let detail = match cmd {
         AiCommand::ReadFile { path, offset_lines } if *offset_lines > 0 => {
             format!("{path} (offset={offset_lines})")
@@ -98,19 +98,25 @@ fn hook_log_action(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
 }
 
 /// 2MB を超えるファイルの読み込みをブロック
-fn hook_guard_large_file(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
+fn hook_guard_large_file(tool_name: &str, cmd: &AiCommand, root: &std::path::Path) -> PreHookOutcome {
     const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
     if tool_name != "read_file" {
         return PreHookOutcome::Continue;
     }
     if let AiCommand::ReadFile { path, .. } = cmd {
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() > MAX_FILE_BYTES {
-                return PreHookOutcome::Block(format!(
-                    "ファイル '{path}' が大きすぎます ({} bytes)。read_file は {}MB 以下のファイル向けです。",
-                    meta.len(),
-                    MAX_FILE_BYTES / 1024 / 1024
-                ));
+        // 絶対パス・'..' は ctx.resolve() で後から拒否されるのでここではスキップ
+        if !crate::paths::is_absolute_path_arg(path)
+            && !crate::paths::has_parent_component_arg(path)
+        {
+            let abs = root.join(path);
+            if let Ok(meta) = std::fs::metadata(&abs) {
+                if meta.len() > MAX_FILE_BYTES {
+                    return PreHookOutcome::Block(format!(
+                        "ファイル '{path}' が大きすぎます ({} bytes)。read_file は {}MB 以下のファイル向けです。",
+                        meta.len(),
+                        MAX_FILE_BYTES / 1024 / 1024
+                    ));
+                }
             }
         }
     }
@@ -118,7 +124,7 @@ fn hook_guard_large_file(tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
 }
 
 /// ファイル削除・上書きを cmd_log に記録する（監査ログ）
-fn hook_notify_destructive(_tool_name: &str, cmd: &AiCommand) -> PreHookOutcome {
+fn hook_notify_destructive(_tool_name: &str, cmd: &AiCommand, _root: &std::path::Path) -> PreHookOutcome {
     let action = match cmd {
         AiCommand::DeleteFile { path } => Some(format!("DELETE {path}")),
         AiCommand::File { path, .. } => Some(format!("WRITE  {path}")),
@@ -154,7 +160,8 @@ mod tests {
             path: "nonexistent.rs".to_string(),
             offset_lines: 0,
         };
-        assert!(matches!(run("read_file", &cmd), PreHookOutcome::Continue));
+        let root = std::path::Path::new(".");
+        assert!(matches!(run("read_file", &cmd, root), PreHookOutcome::Continue));
     }
 
     #[test]
@@ -162,7 +169,8 @@ mod tests {
         let cmd = AiCommand::ListDir {
             path: "src".to_string(),
         };
-        assert!(matches!(run("list_dir", &cmd), PreHookOutcome::Continue));
+        let root = std::path::Path::new(".");
+        assert!(matches!(run("list_dir", &cmd, root), PreHookOutcome::Continue));
     }
 
     #[test]
@@ -171,6 +179,7 @@ mod tests {
         let cmd = AiCommand::DeleteFile {
             path: "old.rs".to_string(),
         };
-        assert!(matches!(run("delete_file", &cmd), PreHookOutcome::Continue));
+        let root = std::path::Path::new(".");
+        assert!(matches!(run("delete_file", &cmd, root), PreHookOutcome::Continue));
     }
 }

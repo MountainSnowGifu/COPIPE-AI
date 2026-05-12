@@ -28,12 +28,18 @@ pub(super) async fn scroll_to_nth_ai_message(page: &chromiumoxide::Page, n: usiz
 // ─── DOM 読み取り ─────────────────────────────────────────────────────────────
 
 pub(crate) async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Result<usize> {
-    let n = page
-        .evaluate_expression(r#"document.querySelectorAll('[data-testid="ai-message"]').length"#)
-        .await?
-        .value()
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| anyhow::anyhow!("ai-message 数の取得に失敗"))?;
+    let n = tokio::time::timeout(
+        Duration::from_secs(8),
+        page.evaluate_expression(
+            r#"document.querySelectorAll('[data-testid="ai-message"]').length"#,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("ai_message_count タイムアウト (8s)"))?
+    ?
+    .value()
+    .and_then(|v| v.as_f64())
+    .ok_or_else(|| anyhow::anyhow!("ai-message 数の取得に失敗"))?;
     Ok(n as usize)
 }
 
@@ -59,9 +65,8 @@ fn extract_ai_text(raw: &str) -> String {
 }
 
 pub(crate) async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> String {
-    let raw = page
-        .evaluate_expression(&format!(
-            r#"
+    let js = format!(
+        r#"
             (() => {{
                 const msgs = document.querySelectorAll('[data-testid="ai-message"]');
                 if (msgs.length < {n}) return '';
@@ -72,9 +77,11 @@ pub(crate) async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> St
                 return clone.innerText.trim();
             }})()
         "#
-        ))
+    );
+    let raw = tokio::time::timeout(Duration::from_secs(8), page.evaluate_expression(&js))
         .await
         .ok()
+        .and_then(|r| r.ok())
         .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
         .unwrap_or_default();
 
@@ -84,9 +91,8 @@ pub(crate) async fn read_nth_ai_text(page: &chromiumoxide::Page, n: usize) -> St
 pub(crate) async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize) -> Vec<String> {
     let _ = tokio::time::timeout(Duration::from_secs(3), scroll_to_nth_ai_message(page, n)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let raw = page
-        .evaluate_expression(&format!(
-            r#"
+    let js = format!(
+        r#"
             (() => {{
                 const msgs = document.querySelectorAll('[data-testid="ai-message"]');
                 if (msgs.length < {n}) return '';
@@ -95,9 +101,11 @@ pub(crate) async fn get_codeblocks_from_dom(page: &chromiumoxide::Page, n: usize
                 return blocks.map(b => b.innerText.trim()).filter(t => t).join('\x00');
             }})()
         "#
-        ))
+    );
+    let raw = tokio::time::timeout(Duration::from_secs(8), page.evaluate_expression(&js))
         .await
         .ok()
+        .and_then(|r| r.ok())
         .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
         .unwrap_or_default();
 

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const LOG_DIR: &str = ".copipe_logs";
-pub const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "browser_log", "todo"];
+pub const ALLOWED_LOGS: &[&str] = &["cmd_log", "ai_log", "browser_log", "debug_log", "todo"];
 
 pub fn init_todo_log(root: &Path) -> std::io::Result<()> {
     tools::todo_write::init_empty(root)
@@ -64,10 +64,12 @@ pub fn safe_append_log(path: &Path, content: &str) {
 
 pub fn now_timestamp() -> String {
     // TZ 未設定 → 日本環境デフォルト JST。TZ が設定されているが未知の値 → UTC
-    // （例: TZ=America/New_York のとき予期せず JST になることを防ぐ）
+    // 対応パターン: Asia/Tokyo, Japan, JST, JST-9, +09:00, +0900 → JST(+9)
+    // それ以外（America/*, Europe/* 等）は UTC として扱う
     let offset_hours: i64 = match std::env::var("TZ").ok().as_deref() {
         None | Some("") => 9,
         Some(tz) if tz.contains("Tokyo") || tz.contains("JST") => 9,
+        Some("Japan") | Some("JST-9") | Some("+09:00") | Some("+0900") => 9,
         Some(tz) if tz == "UTC" || tz == "GMT" => 0,
         Some(_) => 0,
     };
@@ -86,41 +88,21 @@ pub fn now_timestamp() -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02} {tz_label}")
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut y = 1970u64;
-    loop {
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let dy = if leap { 366 } else { 365 };
-        if days < dy {
-            break;
-        }
-        days -= dy;
-        y += 1;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let months = [
-        31u64,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut mo = 1u64;
-    for &dm in &months {
-        if days < dm {
-            break;
-        }
-        days -= dm;
-        mo += 1;
-    }
-    (y, mo, days + 1)
+/// Unix エポック（1970-01-01）からの日数を (year, month, day) に変換する。
+/// Howard Hinnant のグレゴリオ暦直接計算アルゴリズムを使用（O(1)）。
+/// https://howardhinnant.github.io/date_algorithms.html
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let z = days as i64 + 719_468; // 内部エポックを 0000-03-01 基準に変換
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = (z - era * 146_097) as u64; // era 内の日数 [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // era 内の年 [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // 年内の日数 [0, 365]
+    let mp = (5 * doy + 2) / 153; // 月 (3月=0 起算) [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // 日 [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // 月 [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u64, m, d)
 }
 
 pub struct ToolResult {
@@ -175,7 +157,7 @@ pub async fn execute(
         // PreToolUse → ツール実行 → PostToolUse のパイプライン
         macro_rules! dispatch {
             ($tool_name:literal, $label:expr, $exec:expr) => {{
-                let result = match pre_hooks::run($tool_name, cmd) {
+                let result = match pre_hooks::run($tool_name, cmd, ctx.root) {
                     pre_hooks::PreHookOutcome::Block(msg) => blocked($label, msg),
                     pre_hooks::PreHookOutcome::Continue => post($tool_name, $exec),
                 };

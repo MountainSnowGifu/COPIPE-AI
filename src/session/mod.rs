@@ -151,12 +151,35 @@ impl CopilotSession {
 
         dismiss_signin_later_safe(page).await;
         wait_for_input(page, 10).await?;
+
+        // 入力前にページを少しスクロール（直前の応答を読み終えた自然な動作）
+        {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            // 50%の確率でスクロール（毎回やると不自然）
+            if seed % 2 == 0 {
+                let dy = 40 + (seed % 80); // 40〜119px 下にスクロール
+                let js = format!("window.scrollBy({{top: {dy}, behavior: 'smooth'}});");
+                tokio::time::timeout(Duration::from_secs(3), page.evaluate_expression(&js))
+                    .await
+                    .ok();
+                tokio::time::sleep(jitter(400, 300)).await;
+            }
+        }
+
         scroll_to_selector(page, INPUT_SELECTOR).await;
         tokio::time::sleep(jitter(700, 500)).await;
 
         // Bézier 曲線軌跡でマウスを入力欄に移動してクリック
-        page.evaluate_expression(include_str!("js/move_and_click.js"))
-            .await?;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            page.evaluate_expression(include_str!("js/move_and_click.js")),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("move_and_click タイムアウト"))?
+        ?;
         tokio::time::sleep(jitter(600, 400)).await;
 
         // テキスト入力: React setter を主軸にしつつ追加イベントで React state を確実に更新
@@ -166,21 +189,29 @@ impl CopilotSession {
             std::io::stderr().flush().ok();
         }
         let js_str = serde_json::to_string(prompt)?;
-        page.evaluate_expression(&format!(
-            "({})({})",
-            include_str!("js/react_set_value.js"),
-            js_str
-        ))
-        .await?;
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            page.evaluate_expression(&format!(
+                "({})({})",
+                include_str!("js/react_set_value.js"),
+                js_str
+            )),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("react_set_value タイムアウト"))?
+        ?;
         tokio::time::sleep(jitter(900, 700)).await;
 
         // 送信: 送信ボタンクリックを優先し、見つからない場合は Enter キーにフォールバック
         let target = baseline + 1;
-        let btn_result = page
-            .evaluate_expression(include_str!("js/send_button.js"))
-            .await
-            .ok()
-            .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())));
+        let btn_result = tokio::time::timeout(
+            Duration::from_secs(10),
+            page.evaluate_expression(include_str!("js/send_button.js")),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())));
 
         let send_log_msg = if let Some(ref detail) = btn_result {
             // ボタンクリック成功
@@ -188,28 +219,39 @@ impl CopilotSession {
             format!("[送信:ボタン] {detail}\n---")
         } else {
             // ボタンが見つからない場合は Enter キーで試みる
-            page.evaluate_expression(include_str!("js/send_enter.js"))
-                .await?;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                page.evaluate_expression(include_str!("js/send_enter.js")),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("send_enter タイムアウト"))?
+            ?;
             tokio::time::sleep(jitter(400, 250)).await;
 
             // 入力欄にテキストが残っていれば最終手段としてボタン再試行
-            let still_text = page
-                .evaluate_expression(
+            let still_text = tokio::time::timeout(
+                Duration::from_secs(8),
+                page.evaluate_expression(
                     r#"(function() {
                         const inp = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
                         if (!inp) return false;
                         if ('value' in inp) return (inp.value || '').length > 0;
                         return (inp.innerText || inp.textContent || '').length > 0;
                     })()"#,
+                ),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(|r| r.value().and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+            if still_text && ai_message_count(page).await.unwrap_or(0) < target {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    page.evaluate_expression(include_str!("js/send_button.js")),
                 )
                 .await
-                .ok()
-                .and_then(|r| r.value().and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-            if still_text && ai_message_count(page).await.unwrap_or(0) < target {
-                page.evaluate_expression(include_str!("js/send_button.js"))
-                    .await
-                    .ok();
+                .ok();
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 "[送信フォールバック:ボタン再試行]\n---".to_string()
             } else {
@@ -239,8 +281,8 @@ impl CopilotSession {
         }
 
         let log_dir_ref = self.log_dir.as_deref();
-        wait_for_ai_message_count(page, target, 90, log_dir_ref).await?;
-        wait_for_stable_text(page, target, 90, log_dir_ref).await?;
+        wait_for_ai_message_count(page, target, 120, log_dir_ref).await?;
+        wait_for_stable_text(page, target, 180, log_dir_ref).await?;
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
             scroll_to_nth_ai_message(page, target),
@@ -286,5 +328,19 @@ impl CopilotSession {
                 eprintln!("[停止] {}", v.as_str().unwrap_or(""));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn react_set_value_script_can_be_wrapped_as_callable_expression() {
+        let script = include_str!("js/react_set_value.js");
+        let arg = serde_json::to_string("hello; world").unwrap();
+        let wrapped = format!("({script})({arg})");
+
+        assert!(!wrapped.contains("});)("));
+        assert!(wrapped.starts_with("((function"));
+        assert!(wrapped.contains(")(\"hello; world\")"));
     }
 }

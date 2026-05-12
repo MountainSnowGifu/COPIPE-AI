@@ -1,5 +1,5 @@
-use crate::executor::ToolResult;
 use crate::executor::context::ToolContext;
+use crate::executor::ToolResult;
 
 pub fn handle(ctx: &mut ToolContext<'_>, path: &str, offset_lines: usize) -> ToolResult {
     if ctx.turn_read_chars >= ctx.max_turn_read {
@@ -48,7 +48,12 @@ pub fn handle(ctx: &mut ToolContext<'_>, path: &str, offset_lines: usize) -> Too
                 };
                 let sliced_lines = total_lines.saturating_sub(offset_lines);
 
-                let out = if sliced.chars().count() > budget {
+                let out = if offset_lines > 0 && offset_lines >= total_lines {
+                    format!(
+                        "EOF: {path} は全 {total_lines} 行で、offset_lines={offset_lines} 以降に残りの行はありません。\n\
+                        追加の read_file は不要です。既に読んだ内容を根拠に次のアクションへ進んでください。"
+                    )
+                } else if sliced.chars().count() > budget {
                     // 行の途中で切らず最後の完全な改行位置で切り詰める
                     let char_budget: String = sliced.chars().take(budget).collect();
                     let safe_end = char_budget
@@ -87,4 +92,26 @@ pub fn handle(ctx: &mut ToolContext<'_>, path: &str, offset_lines: usize) -> Too
         },
         output,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::CheckpointManager;
+    use std::collections::HashSet;
+
+    #[test]
+    fn offset_past_end_reports_eof_instead_of_empty_code_block() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("novel.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut read_files = HashSet::new();
+        let mut checkpoints = CheckpointManager::new(dir.path());
+        let mut ctx = ToolContext::new(dir.path(), &mut read_files, &mut checkpoints);
+
+        let result = handle(&mut ctx, "novel.txt", 10);
+
+        assert!(result.output.contains("EOF: novel.txt は全 3 行"));
+        assert!(result.output.contains("追加の read_file は不要"));
+        assert!(!result.output.contains("```\n\n```"));
+    }
 }

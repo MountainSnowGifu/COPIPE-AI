@@ -1,6 +1,7 @@
 mod context;
 pub mod debug_log;
 mod log;
+pub(crate) mod outcome;
 mod parser;
 mod prompt;
 pub mod rate_limiter;

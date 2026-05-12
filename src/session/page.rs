@@ -9,7 +9,7 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
 use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
 use std::time::Duration;
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
 const ACCEPT_LANGUAGE: &str = "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7";
 
 fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
@@ -227,18 +227,147 @@ try {
 try {
     Object.defineProperty(window, 'devicePixelRatio', { get: () => 1.25 });
 } catch(_) {}
+
+// JST タイムゾーンと Date API を確実に整合させる
+// CDP が Asia/Tokyo を設定しても getTimezoneOffset() がずれることがあるため上書き
+try {
+    const _gto = Date.prototype.getTimezoneOffset;
+    Date.prototype.getTimezoneOffset = function() {
+        const real = _gto.call(this);
+        return (real >= -600 && real <= -480) ? real : -540;
+    };
+} catch(_) {}
+
+// navigator.mimeTypes を plugins と整合させる（PDF 関連のみ）
+try {
+    const _plugins = navigator.plugins;
+    const fakeMimes = [
+        {type: 'application/pdf',             suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: _plugins[0]},
+        {type: 'text/pdf',                    suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: _plugins[0]},
+        {type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: _plugins[0]},
+    ];
+    Object.setPrototypeOf(fakeMimes, MimeTypeArray.prototype);
+    Object.defineProperty(navigator, 'mimeTypes', { get: () => fakeMimes });
+} catch(_) {}
+
+// performance.memory（Chrome 固有 API）を自然な値で提供
+try {
+    if (!performance.memory) {
+        Object.defineProperty(performance, 'memory', {
+            get: () => ({
+                jsHeapSizeLimit:  4294705152,
+                totalJSHeapSize:  20000000 + Math.floor(Math.random() * 8000000),
+                usedJSHeapSize:   10000000 + Math.floor(Math.random() * 4000000),
+            })
+        });
+    }
+} catch(_) {}
+
+// navigator.doNotTrack = null（Chrome デフォルト。"1" だと bot 判定されやすい）
+try {
+    if (navigator.doNotTrack !== null) {
+        Object.defineProperty(navigator, 'doNotTrack', { get: () => null });
+    }
+} catch(_) {}
+
+// Error.stack 内の cdp:// URI を消去（CDP 実行痕跡を隠す）
+try {
+    const _prepare = Error.prepareStackTrace;
+    if (_prepare) {
+        Error.prepareStackTrace = function(err, frames) {
+            const result = _prepare.call(this, err, frames);
+            return typeof result === 'string'
+                ? result.replace(/cdp:\/\/[^\n]*/g, '')
+                : result;
+        };
+    }
+} catch(_) {}
+
+// speechSynthesis.getVoices() を非空にする（Chromium では通常複数ボイスが存在）
+try {
+    if (window.speechSynthesis && speechSynthesis.getVoices().length === 0) {
+        const _getVoices = speechSynthesis.getVoices.bind(speechSynthesis);
+        Object.defineProperty(speechSynthesis, 'getVoices', {
+            value: function() {
+                const v = _getVoices();
+                return v.length > 0 ? v : [];
+            }
+        });
+    }
+} catch(_) {}
+
+// AudioContext fingerprint にノイズを乗せる
+// AnalyserNode の周波数データを微量ランダム変動させてフィンガープリントを揺らす
+try {
+    const _createAnalyser = AudioContext.prototype.createAnalyser;
+    AudioContext.prototype.createAnalyser = function() {
+        const node = _createAnalyser.call(this);
+        const _getFloat = node.getFloatFrequencyData.bind(node);
+        node.getFloatFrequencyData = function(arr) {
+            _getFloat(arr);
+            for (let i = 0; i < arr.length; i++) arr[i] += (Math.random() - 0.5) * 0.005;
+        };
+        return node;
+    };
+} catch(_) {}
+
+// matchMedia を自然に応答させる（bot 検知で prefers-color-scheme 等を確認する場合がある）
+try {
+    const _mq = window.matchMedia.bind(window);
+    window.matchMedia = function(query) {
+        const mql = _mq(query);
+        if (!mql) return mql;
+        // prefers-reduced-motion: no-preference が自然（アニメーション有効な通常ユーザー）
+        if (query.includes('prefers-reduced-motion')) {
+            Object.defineProperty(mql, 'matches', { get: () => false });
+        }
+        return mql;
+    };
+} catch(_) {}
+
+// navigator.mediaDevices.enumerateDevices を自然な値で返す
+// 実際のブラウザはカメラ/マイク等のデバイスリストを持つ
+try {
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        const _enum = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+        navigator.mediaDevices.enumerateDevices = function() {
+            return _enum().then(devices => {
+                if (devices.length > 0) return devices;
+                // デバイスが空の場合はダミーを返す（Headless 検知対策）
+                return [
+                    { kind: 'audioinput',  deviceId: 'default', label: '', groupId: 'default' },
+                    { kind: 'audiooutput', deviceId: 'default', label: '', groupId: 'default' },
+                ];
+            }).catch(() => []);
+        };
+    }
+} catch(_) {}
+
+// window.open / window.print の存在を確認（headless 判定に使われることがある）
+try {
+    if (typeof window.open !== 'function') {
+        window.open = function() { return null; };
+    }
+} catch(_) {}
+
+// history.length を自然な値に（新規タブは 1、通常利用は 2以上）
+try {
+    if (history.length <= 1) {
+        Object.defineProperty(window.history, 'length', { get: () => 3 });
+    }
+} catch(_) {}
 "#;
 
 fn user_agent_metadata() -> anyhow::Result<UserAgentMetadata> {
     Ok(UserAgentMetadata::builder()
         .brands([
-            UserAgentBrandVersion::new("Chromium", "124"),
-            UserAgentBrandVersion::new("Microsoft Edge", "124"),
+            UserAgentBrandVersion::new("Chromium", "136"),
+            UserAgentBrandVersion::new("Microsoft Edge", "136"),
             UserAgentBrandVersion::new("Not-A.Brand", "99"),
         ])
         .full_version_lists([
-            UserAgentBrandVersion::new("Chromium", "124.0.0.0"),
-            UserAgentBrandVersion::new("Microsoft Edge", "124.0.0.0"),
+            UserAgentBrandVersion::new("Chromium", "136.0.0.0"),
+            UserAgentBrandVersion::new("Microsoft Edge", "136.0.0.0"),
             UserAgentBrandVersion::new("Not-A.Brand", "99.0.0.0"),
         ])
         .platform("Windows")
@@ -295,10 +424,10 @@ pub(super) async fn wait_for_input(
             }})()
             "#
         );
-        let found = page
-            .evaluate_expression(&js)
+        let found = tokio::time::timeout(Duration::from_secs(8), page.evaluate_expression(&js))
             .await
             .ok()
+            .and_then(|r| r.ok())
             .and_then(|r| r.value().and_then(|v| v.as_bool()))
             .unwrap_or(false);
 
@@ -368,8 +497,9 @@ pub(super) async fn dismiss_signin_later(page: &chromiumoxide::Page) -> bool {
 }
 
 pub(super) async fn dismiss_signin_later_safe(page: &chromiumoxide::Page) -> bool {
-    let visible = page
-        .evaluate_expression(
+    let visible = tokio::time::timeout(
+        Duration::from_secs(8),
+        page.evaluate_expression(
             r#"
             (() => {
                 const labels = ["\u5f8c\u3067", "Later", "Not now", "Skip for now"];
@@ -398,22 +528,28 @@ pub(super) async fn dismiss_signin_later_safe(page: &chromiumoxide::Page) -> boo
                     }));
             })()
             "#,
-        )
-        .await
-        .ok()
-        .and_then(|r| r.value().and_then(|v| v.as_bool()))
-        .unwrap_or(false);
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|r| r.value().and_then(|v| v.as_bool()))
+    .unwrap_or(false);
 
     if !visible {
         return false;
     }
 
     tokio::time::sleep(jitter(650, 850)).await;
-    page.evaluate_expression(include_str!("js/dismiss_signin_later.js"))
-        .await
-        .ok()
-        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-        .is_some()
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        page.evaluate_expression(include_str!("js/dismiss_signin_later.js")),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+    .is_some()
 }
 
 pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<chromiumoxide::Page> {

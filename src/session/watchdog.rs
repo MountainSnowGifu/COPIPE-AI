@@ -13,29 +13,51 @@ fn spin(tick: u64) -> &'static str {
     }
 }
 
-/// 人間らしいアイドルマウス動作を発火する（bot 検知回避）
+/// 人間らしいアイドル動作（マウス移動 + 確率的スクロール）を発火する（bot 検知回避）
 async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
-    // as_nanos() で秒全体を seed に使い、同ミリ秒内で同値になる問題を回避
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    // 画面上の適当な位置に小さなマウス移動を生成
+
+    // マウス移動（小幅なベジェ軌跡）
     let x = 200.0 + (seed % 800) as f64;
     let y = 150.0 + ((seed / 800) % 400) as f64;
     let dx = ((seed % 30) as f64) - 15.0;
     let dy = (((seed / 30) % 30) as f64) - 15.0;
+
+    // 約30%の確率でスクロール動作を混ぜる（読み進めている自然な動作）
+    let do_scroll = (seed / 1000) % 10 < 3;
+    let scroll_dy = if (seed / 100) % 2 == 0 {
+        // ゆっくり下にスクロール（30〜80px）
+        (30 + (seed % 50)) as i64
+    } else {
+        // 少し戻るスクロール（10〜30px）
+        -((10 + (seed % 20)) as i64)
+    };
+
+    let scroll_js = if do_scroll {
+        format!(
+            "window.scrollBy({{top: {scroll_dy}, behavior: 'smooth'}});"
+        )
+    } else {
+        String::new()
+    };
+
     let js = format!(
         r#"document.dispatchEvent(new MouseEvent('mousemove', {{
             bubbles: true, clientX: {x}, clientY: {y}
         }}));
         document.dispatchEvent(new MouseEvent('mousemove', {{
             bubbles: true, clientX: {}, clientY: {}
-        }}));"#,
+        }}));
+        {scroll_js}"#,
         x + dx,
         y + dy
     );
-    page.evaluate_expression(&js).await.ok();
+    tokio::time::timeout(Duration::from_secs(5), page.evaluate_expression(&js))
+        .await
+        .ok();
 }
 
 fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
@@ -84,9 +106,10 @@ pub(super) async fn detect_copilot_block(page: &chromiumoxide::Page) -> Option<S
         return null;
     })()
     "#;
-    page.evaluate_expression(js)
+    tokio::time::timeout(Duration::from_secs(8), page.evaluate_expression(js))
         .await
         .ok()
+        .and_then(|r| r.ok())
         .and_then(|r| r.value().cloned())
         .and_then(|v| {
             if v.is_null() {
@@ -133,7 +156,7 @@ pub(super) async fn wait_for_ai_message_count(
         if tokio::time::Instant::now() >= check_block_at {
             check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
             // 診断情報は root ベースのログファイルのみ（端末には出さない）
-            let input_state = page.evaluate_expression(r#"
+            let diag_js = r#"
                 (function() {
                     const inp = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
                     const allBtns = [...document.querySelectorAll('button')].map(b => ({
@@ -150,9 +173,16 @@ pub(super) async fn wait_for_ai_message_count(
                         all_btns: allBtns,
                     });
                 })()
-            "#).await.ok()
-                .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-                .unwrap_or_else(|| "{}".to_string());
+            "#;
+            let input_state = tokio::time::timeout(
+                Duration::from_secs(8),
+                page.evaluate_expression(diag_js),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+            .unwrap_or_else(|| "{}".to_string());
             write_diag_log(log_dir, &format!("[診断] {input_state}"));
             if let Some(reason) = detect_copilot_block(page).await {
                 anyhow::bail!(

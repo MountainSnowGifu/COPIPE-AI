@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&log_dir).ok();
     // #8: ログディレクトリの初回案内（ディレクトリが新規作成された場合）
     let is_first_run = !log_dir.join("ai_log").exists();
-    for name in &["ai_log", "cmd_log", "browser_log"] {
+    for name in &["ai_log", "cmd_log", "browser_log", "debug_log"] {
         let log_path = log_dir.join(name);
         if log_path
             .symlink_metadata()
@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
         );
         if debug {
             println!(
-                "{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・状態を記録します{RESET}"
+                "{YELLOW}デバッグモード: .copipe_logs/debug_log にプロンプト・タイミング・動作イベントを記録します{RESET}"
             );
         }
     }
@@ -176,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     // #8: 初回起動時のみログディレクトリを案内
     if is_first_run {
         println!(
-            "{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log){RESET}",
+            "{DIM}ログ出力先: {} (ai_log, cmd_log, browser_log, debug_log){RESET}",
             log_dir.display()
         );
     }
@@ -432,16 +432,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn canonicalize_clean(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let canonical = path.canonicalize()?;
-    // Windows の canonicalize は \\?\ プレフィックス（拡張パス）を返す場合があるので除去
-    #[cfg(target_os = "windows")]
-    {
-        let s = canonical.to_string_lossy();
-        if let Some(stripped) = s.strip_prefix(r"\\?\") {
-            return Ok(std::path::PathBuf::from(stripped));
-        }
-    }
-    Ok(canonical)
+    paths::canonicalize_clean(path).map_err(Into::into)
 }
 
 fn clean_task_input(input: &str) -> String {

@@ -5,7 +5,21 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn enabled() -> bool {
     *ENABLED.get_or_init(|| {
-        std::env::var("NO_COLOR").is_err() && std::env::var("TERM").as_deref() != Ok("dumb")
+        if std::env::var("NO_COLOR").is_ok() {
+            return false;
+        }
+        if std::env::var("TERM").as_deref() == Ok("dumb") {
+            return false;
+        }
+        // Windows cmd.exe は ANSI を解釈しないため、
+        // WT_SESSION（Windows Terminal）または ConEmuANSI がある場合のみ有効化する
+        #[cfg(target_os = "windows")]
+        {
+            return std::env::var("WT_SESSION").is_ok()
+                || std::env::var("ConEmuANSI").as_deref() == Ok("ON");
+        }
+        #[cfg(not(target_os = "windows"))]
+        true
     })
 }
 
