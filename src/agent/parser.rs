@@ -20,6 +20,8 @@ pub(super) const SCHEMA_HINT: &str = r#"【正しいJSON形式の例】
   read_file: path  ※ offset_lines(省略可) で続きを読める
   list_dir:  path
   file:      path, content
+  edit:      path, old_string, new_string  ※ old_string はファイル内の一致箇所(1箇所だけ)
+  multi_edit: path, edits([{old_string, new_string}, ...])
   patch:     path, diff
   mkdir:     path
   delete_file: path

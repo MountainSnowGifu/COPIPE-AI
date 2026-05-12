@@ -28,7 +28,11 @@ pub fn handle(ctx: &mut ToolContext<'_>, path: &str, offset_lines: usize) -> Too
                         format!(" 同ディレクトリの実在ファイル: {}", names.join(", "))
                     })
                     .unwrap_or_default();
-                format!("ERROR: ファイルが存在しません: '{path}'.{hint}")
+                format!(
+                    "ERROR: ファイルが存在しません: '{path}'.{hint}\n\
+                    glob でプロジェクト構成を確認してから read_file してください: \
+                    {{\"type\":\"glob\",\"pattern\":\"**/*.rs\"}}"
+                )
             }
             Ok(content) => {
                 let budget = ctx.max_turn_read.saturating_sub(ctx.turn_read_chars);

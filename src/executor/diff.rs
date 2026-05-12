@@ -103,16 +103,10 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
 
         let old_count = hunk.iter().filter(|(m, _)| matches!(m, ' ' | '-')).count();
 
-        // ハンクヘッダーの行数宣言と実際のハンク内容が矛盾する場合は拒否
-        // old_count == 0 は行番号省略の @@ なので検証をスキップ
-        if declared_old_count > 0 && old_count != declared_old_count {
-            return Err(format!(
-                "diff ヘッダーの行数宣言 ({declared_old_count}) と実際のハンク内容 ({old_count} 行) が一致しません"
-            ));
-        }
-
-        // old_start == 0 は行番号省略の @@ → コンテキスト検索で位置を特定
-        let apply_at = if old_start == 0 {
+        // old_start == 0（行番号省略の @@）または行数宣言がハンク内容と不一致の場合は
+        // コンテキスト検索で適用位置を特定する（LLM が行数を誤ってもリカバリ可能にする）
+        let count_mismatch = declared_old_count > 0 && old_count != declared_old_count;
+        let apply_at = if old_start == 0 || count_mismatch {
             match find_hunk_position(&lines, &hunk) {
                 Some(pos) => pos,
                 None => {
@@ -122,6 +116,12 @@ pub fn apply_unified_diff(content: &str, diff: &str) -> Result<String, String> {
                         .take(3)
                         .map(|(_, s)| s.as_str())
                         .collect();
+                    if count_mismatch {
+                        return Err(format!(
+                            "diff ヘッダーの行数宣言 ({declared_old_count}) とハンク内容 ({old_count} 行) が不一致で、コンテキスト行もファイル内に見つかりません。\n  検索行: {:?}\n  代替: multi_edit を使うと確実です。read_file でファイル内容を確認してから old_string/new_string で指定してください。",
+                            needle_preview
+                        ));
+                    }
                     return Err(format!(
                         "パッチ適用失敗: コンテキスト行がファイル内に見つかりません\n  検索行: {:?}",
                         needle_preview

@@ -209,6 +209,37 @@ fn normalize_command_value(value: Value) -> Value {
                     if let Some(patch) = map.remove("patch") {
                         map.insert("diff".to_string(), patch);
                     }
+                } else if kind == "edit" && !map.contains_key("old_string") {
+                    // AI が edit: { before: "...", after: "..." } 形式で出力した場合に正規化
+                    // また before / after / old / new をトップレベルに書いた場合にも対応
+                    if let Some(Value::Object(sub)) = map.remove("edit") {
+                        let before = sub
+                            .get("before")
+                            .or_else(|| sub.get("old"))
+                            .or_else(|| sub.get("old_string"))
+                            .cloned();
+                        let after = sub
+                            .get("after")
+                            .or_else(|| sub.get("new"))
+                            .or_else(|| sub.get("new_string"))
+                            .cloned();
+                        if let (Some(b), Some(a)) = (before, after) {
+                            map.insert("old_string".to_string(), b);
+                            map.insert("new_string".to_string(), a);
+                        }
+                    } else {
+                        // トップレベルに before / after / old / new がある場合
+                        let before = map
+                            .remove("before")
+                            .or_else(|| map.remove("old"));
+                        let after = map
+                            .remove("after")
+                            .or_else(|| map.remove("new"));
+                        if let (Some(b), Some(a)) = (before, after) {
+                            map.insert("old_string".to_string(), b);
+                            map.insert("new_string".to_string(), a);
+                        }
+                    }
                 }
             }
             Value::Object(map)

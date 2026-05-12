@@ -83,11 +83,11 @@ async fn filter_by_permission(
 
     // 破壊的操作があれば一覧表示して確認
     println!();
-    println!("  \x1b[33m⚠ 変更操作が含まれます:\x1b[0m");
+    println!("  {YELLOW}⚠ 変更操作が含まれます:{RESET}");
     for (_, label) in &destructive_summary {
-        println!("    \x1b[2m→ {label}\x1b[0m");
+        println!("    {DIM}→ {label}{RESET}");
     }
-    print!("  続けますか? \x1b[1m[Enter=実行 / n=スキップ]\x1b[0m ");
+    print!("  続けますか? {BOLD}[Enter=実行 / n=この操作だけスキップ（タスクは継続）]{RESET} ");
     std::io::stdout().flush().ok();
 
     let answer = tokio::task::spawn_blocking(|| {
@@ -104,7 +104,9 @@ async fn filter_by_permission(
         // 破壊的コマンドをスキップして読み取り系のみ残す
         let skip_indices: std::collections::HashSet<usize> =
             destructive_summary.iter().map(|(i, _)| *i).collect();
-        println!("  \x1b[2m破壊的操作をスキップしました（読み取り操作は継続）\x1b[0m");
+        println!(
+            "  {YELLOW}⚠ 変更操作をスキップしました。{BOLD}タスクは継続します{RESET}{YELLOW}（AIが別の方法を試みます）{RESET}"
+        );
         commands
             .into_iter()
             .enumerate()
@@ -150,6 +152,7 @@ struct TurnState<'a> {
     consecutive_ask_user: u32,
     consecutive_edit_fail: u32,
     last_failed_edit_path: &'a str,
+    consecutive_empty_grep: u32,
 }
 
 /// エージェントループの連続操作カウンター（core-internals.md §state参照）
@@ -159,6 +162,7 @@ struct LoopCounters {
     consecutive_ask_user: u32,
     consecutive_edit_fail: u32,
     last_failed_edit_path: String,
+    consecutive_empty_grep: u32,
 }
 
 impl LoopCounters {
@@ -169,6 +173,7 @@ impl LoopCounters {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: String::new(),
+            consecutive_empty_grep: 0,
         }
     }
 
@@ -209,19 +214,22 @@ impl LoopCounters {
             self.consecutive_ask_user = 0;
         }
 
-        // edit 連続失敗カウント更新
-        // 直近の done_log エントリで同一ファイルへの edit が失敗し続けているか確認
+        // edit / patch 連続失敗カウント更新
+        // 直近の done_log エントリで同一ファイルへの edit / patch が失敗し続けているか確認
         {
             let failed_edit_path = tool_results
                 .iter()
                 .filter(|r| {
                     crate::executor::errors::is_error_output(&r.output)
-                        && (r.label.starts_with("Edit(") || r.label.starts_with("MultiEdit("))
+                        && (r.label.starts_with("Edit(")
+                            || r.label.starts_with("MultiEdit(")
+                            || r.label.starts_with("Patch("))
                 })
                 .filter_map(|r| {
                     r.label
                         .trim_start_matches("Edit(")
                         .trim_start_matches("MultiEdit(")
+                        .trim_start_matches("Patch(")
                         .strip_suffix(')')
                         .map(|s| s.to_string())
                 })
@@ -233,13 +241,43 @@ impl LoopCounters {
                     self.consecutive_edit_fail = 1;
                     self.last_failed_edit_path = path;
                 }
-            } else if commands
-                .iter()
-                .any(|c| matches!(c, AiCommand::Edit { .. } | AiCommand::MultiEdit { .. }))
-            {
-                // edit コマンドが成功した場合はリセット
+            } else if commands.iter().any(|c| {
+                matches!(
+                    c,
+                    AiCommand::Edit { .. } | AiCommand::MultiEdit { .. } | AiCommand::Patch { .. }
+                )
+            }) {
+                // edit / patch コマンドが成功した場合はリセット
                 self.consecutive_edit_fail = 0;
                 self.last_failed_edit_path.clear();
+            }
+        }
+
+        // 連続空 grep カウント更新
+        // grep コマンドが含まれ、かつ全 grep 結果が「マッチなし」だった場合にインクリメント
+        // 書き込み系・Bot など実作業コマンドがあればリセット
+        {
+            let has_grep = commands.iter().any(|c| matches!(c, AiCommand::Grep { .. }));
+            let all_grep_empty = has_grep
+                && tool_results
+                    .iter()
+                    .filter(|r| r.label.starts_with("Grep("))
+                    .all(|r| r.output.contains("マッチなし"));
+            let has_action = commands.iter().any(|c| {
+                matches!(
+                    c,
+                    AiCommand::Bot { .. }
+                        | AiCommand::File { .. }
+                        | AiCommand::Edit { .. }
+                        | AiCommand::MultiEdit { .. }
+                        | AiCommand::Patch { .. }
+                        | AiCommand::Cmd { .. }
+                )
+            });
+            if all_grep_empty && !has_action {
+                self.consecutive_empty_grep += 1;
+            } else {
+                self.consecutive_empty_grep = 0;
             }
         }
     }
@@ -304,6 +342,41 @@ fn apply_stop_hooks(
     outcome
 }
 
+fn should_require_todo_before_development_action(
+    user_task: &str,
+    commands: &[AiCommand],
+    root: &Path,
+) -> bool {
+    if !task_requires_development_action(user_task) {
+        return false;
+    }
+
+    let has_unfinished_todo = todo_write::load(root)
+        .iter()
+        .any(|todo| todo.status != TodoStatus::Completed);
+    if has_unfinished_todo {
+        return false;
+    }
+
+    let has_todo_write = commands
+        .iter()
+        .any(|c| matches!(c, AiCommand::TodoWrite { .. }));
+    let has_development_action = commands.iter().any(|c| {
+        matches!(
+            c,
+            AiCommand::File { .. }
+                | AiCommand::Edit { .. }
+                | AiCommand::MultiEdit { .. }
+                | AiCommand::Patch { .. }
+                | AiCommand::DeleteFile { .. }
+                | AiCommand::Mkdir { .. }
+                | AiCommand::Cmd { .. }
+        )
+    });
+
+    has_development_action && !has_todo_write
+}
+
 /// ターン終了時の状態を判定して TurnOutcome を返す
 fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
     let user_task = state.user_task;
@@ -322,6 +395,26 @@ fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
     let consecutive_ask_user = state.consecutive_ask_user;
     let consecutive_edit_fail = state.consecutive_edit_fail;
     let last_failed_edit_path = state.last_failed_edit_path;
+    let consecutive_empty_grep = state.consecutive_empty_grep;
+
+    // 連続空 grep（2回以上）→ list_dir / glob への誘導
+    // ログで観察された「fn main → parse → token → struct」の4連続空 grep 問題に対処
+    if consecutive_empty_grep >= 2 && !is_done {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ {consecutive_empty_grep} 回連続で grep 結果が空です]\n\
+                異なるキーワードで grep を繰り返しても結果が得られていません。\
+                プロジェクトが空か最小構成の可能性があります。\n\
+                次のいずれかを実行してください:\n\
+                1. `list_dir` でディレクトリ内の実在ファイルを確認する\n\
+                2. 判明済みのファイルを `read_file` で直接読む\n\
+                3. プロジェクトが空または最小構成なら、必要なファイルを `file` コマンドで直接作成する\n\
+                ```json\n{{\"type\":\"list_dir\",\"path\":\"src\"}}\n```"
+            ),
+        };
+    }
+
     if is_done && bot_message.map(is_placeholder_bot_message).unwrap_or(true) {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
@@ -423,16 +516,15 @@ fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
         };
     }
 
-    // edit / multi_edit の連続失敗（2回以上）検知 → 再読み込みを強制
+    // edit / multi_edit / patch の連続失敗（2回以上）検知 → 再読み込みを強制
     if consecutive_edit_fail >= 2 && !is_done && !last_failed_edit_path.is_empty() {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
                 "{ctx}\n\n\
-                [⚠ `{last_failed_edit_path}` への edit が {consecutive_edit_fail} 回連続で失敗しています]\n\
-                old_string が現在のファイル内容と一致していません。\n\
-                ファイルは既に変更されているか、old_string に余分な空白・改行が含まれている可能性があります。\n\
-                既に変更済みなら `bot` で完了を報告してください。\n\
-                まだ必要なら改めて read_file でファイルの実際の内容を確認し、old_string を正確に合わせてください。\n\
+                [⚠ `{last_failed_edit_path}` への edit / patch が {consecutive_edit_fail} 回連続で失敗しています]\n\
+                `patch` が失敗している場合: diff の行数宣言ずれが原因です。`patch` の代わりに `multi_edit` を使うと確実に置換できます。\n\
+                `edit` / `multi_edit` が失敗している場合: old_string が現在のファイル内容と一致していません。余分な空白・改行が含まれている可能性があります。\n\
+                改めて read_file でファイルの実際の内容を確認し、`multi_edit` で正確に修正してください。\n\
                 ```json\n{{\"type\":\"read_file\",\"path\":\"{last_failed_edit_path}\"}}\n```"
             ),
         };
@@ -629,7 +721,55 @@ fn recovery_hint_for_tool_results(tool_results: &[ToolResult]) -> String {
         )
     };
 
-    format!("{missing_path_hint}{blocked_cargo_hint}{parent_dir_hint}{unread_guard_hint}")
+    // grep 結果が全て空（マッチなし）の場合のヒント
+    // 同一ターン内に複数の空 grep がある場合は list_dir での構造確認を促す
+    let grep_results: Vec<&ToolResult> = tool_results
+        .iter()
+        .filter(|r| r.label.starts_with("Grep("))
+        .collect();
+    let empty_grep_hint = if grep_results.len() >= 2
+        && grep_results.iter().all(|r| r.output.contains("マッチなし"))
+    {
+        "\n\n[同一ターン内の全 grep 結果が空です]\n\
+        複数のキーワードを同時に検索しても全てマッチなしでした。\
+        プロジェクトが空か最小構成の可能性があります。\
+        `list_dir` でディレクトリ構成を確認するか、判明済みのファイルを直接 `read_file` してください。"
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    // patch 失敗時のヒント — diff 形式エラーは multi_edit への切替を促す
+    let patch_fail_hint = if tool_results.iter().any(|r| {
+        r.label.starts_with("Patch(") && is_error_output(&r.output)
+    }) {
+        "\n\n[patch が失敗しました]\n\
+        diff の行数宣言とハンク内容が一致しないか、コンテキスト行がファイル内に見つかりません。\n\
+        `patch` の代わりに `multi_edit` を使うと確実に置換できます。\
+        read_file でファイル内容を確認してから old_string / new_string を指定してください:\n\
+        ```json\n\
+        {\"type\":\"multi_edit\",\"path\":\"対象ファイル\",\"edits\":[{\"old_string\":\"変更前の行\",\"new_string\":\"変更後の行\"}]}\n\
+        ```"
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    // cmd出力が省略された場合のヒント — read_log で全体を確認してから修正するよう促す
+    let truncated_cmd_hint = if tool_results.iter().any(|r| {
+        r.label.starts_with("Cmd(") && r.output.contains("出力が") && r.output.contains("文字を超えたため省略しました")
+    }) {
+        "\n\n[Cmd の出力が省略されています]\n\
+        エラーの全体像を把握するために、まず次の手順で全出力を確認してください:\n\
+        1. `read_log` で `filename: \"cmd_log\"` を指定して全エラーを読む\n\
+        2. 全エラーを確認してから `edit` / `multi_edit` で修正する\n\
+        省略されたまま修正すると見落としが生じます。必ず read_log を先に実行してください。"
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    format!("{missing_path_hint}{blocked_cargo_hint}{parent_dir_hint}{unread_guard_hint}{empty_grep_hint}{patch_fail_hint}{truncated_cmd_hint}")
 }
 
 fn label_inner(label: &str) -> Option<&str> {
@@ -753,6 +893,7 @@ fn build_initial_prompt(user_task: &str) -> String {
             依頼が抽象的でも、具体化質問やプレーンテキスト回答で止めないでください。\
             まず現在の作業ディレクトリに実在するファイルを確認し、そこから実装対象を絞ってください。\
             調査後に候補だけを並べてユーザーへ方向性を聞かず、最小で保守的な改善を1つ選んで実装してください。\
+            対象が見えたら編集前に `todo_write` で TODO.JSON に実行計画を保存してください。\
             最初の返答は必ず次の形の JSON コードブロックにしてください:\n\
             ```json\n\
             [\n\
@@ -766,11 +907,11 @@ fn build_initial_prompt(user_task: &str) -> String {
     let next_action_hint = if task_mentions_explicit_filename(user_task) {
         "次のアクションを必ず ```json コードブロックで返してください。\
         依頼文にファイル名が明示されている場合は、glob を省略して直接 `read_file` でファイルを確認してください。\
-        複数ステップに渡る場合は `todo_write` でタスクリストを作成してから進めてください。"
+        実装・修正・改善を行う場合は、編集前に `todo_write` で TODO.JSON に実行計画を作成してから進めてください。"
     } else if task_requires_development_action(user_task) {
         "次のアクションを必ず ```json コードブロックで返してください。\
         まず `glob` で現在のプロジェクト構成を把握し、`grep` で対象を絞り込んでから `read_file` してください。\
-        複数ステップに渡る作業は `todo_write` でタスクリストを作成して進捗を管理しながら進めてください。"
+        対象が見えたら編集前に `todo_write` で TODO.JSON に実行計画を作成し、進捗を管理しながら進めてください。"
     } else {
         "次のアクションを必ず ```json コードブロックで返してください。\
         まだ対象ファイルが不明な場合は、まず `txt` と `glob` で現在のプロジェクト構成を確認してください。"
@@ -1228,6 +1369,26 @@ pub async fn run_agent(
             && tool_results.is_empty()
             && commands.iter().all(|c| matches!(c, AiCommand::Txt { .. }));
 
+        if should_require_todo_before_development_action(user_task, &commands, root) {
+            counters.consecutive_txt += 1;
+            let ctx = build_context_header(user_task, &read_files, root, &done_log);
+            prompt = format!(
+                "{ctx}\n\n\
+                [⚠ 開発作業の実行前に TODO.JSON が未作成です]\n\
+                この依頼は実装・修正・改善系のタスクです。調査結果を踏まえ、\
+                編集・コマンド実行の前に `todo_write` で実行計画を保存してください。\
+                TODO.JSON は提案メモではなく作業キューです。次に実行する1件を `in_progress`、残りを `pending` にしてください。\n\
+                ```json\n\
+                {{\"type\":\"todo_write\",\"todos\":[\
+                {{\"id\":\"1\",\"content\":\"調査結果を踏まえて最小の変更方針を決める\",\"status\":\"completed\"}},\
+                {{\"id\":\"2\",\"content\":\"対象ファイルを実装・修正する\",\"status\":\"in_progress\"}},\
+                {{\"id\":\"3\",\"content\":\"cargo check などで変更を検証する\",\"status\":\"pending\"}}]}}\n\
+                ```"
+            );
+            dbg.turn_end();
+            continue;
+        }
+
         // ask_user 連打の事前ブロック:
         // consecutive_ask_user >= 1 のときに ask_user を再度実行すると
         // ユーザーが複数回連続で質問を受けてしまうため、execute() の前にブロックする。
@@ -1358,6 +1519,7 @@ pub async fn run_agent(
             consecutive_ask_user: counters.consecutive_ask_user,
             consecutive_edit_fail: counters.consecutive_edit_fail,
             last_failed_edit_path: &counters.last_failed_edit_path,
+            consecutive_empty_grep: counters.consecutive_empty_grep,
         });
 
         // ── 4.5 ストップフック（core-internals.md §「hooks.runStop()」参照）────
@@ -1494,7 +1656,7 @@ fn print_summary(done_log: &[String], reached_max: bool) {
     if reached_max {
         println!("\n{YELLOW}最大ターン数 ({MAX_TURNS}) に達しました。{RESET}");
         println!(
-            "{DIM}→ 同じタスクを再入力すると続きから再開できます（セッションを保存済み）。{RESET}"
+            "{DIM}→ 「:resume」または同じタスクを再入力すると続きから再開できます（セッション保存済み）。{RESET}"
         );
         println!(
             "{DIM}  タスクが大きい場合は「〇〇だけ修正して」のように絞り込むと効率的です。{RESET}"
@@ -1608,6 +1770,7 @@ mod tests {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
         });
 
         match outcome {
@@ -1650,6 +1813,7 @@ mod tests {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
         });
 
         match outcome {
@@ -1695,6 +1859,78 @@ mod tests {
             }
             other => panic!("expected todo stop hook nudge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn development_action_requires_todo_when_todo_json_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec![AiCommand::Edit {
+            path: "src/main.rs".into(),
+            old_string: "old".into(),
+            new_string: "new".into(),
+        }];
+
+        assert!(should_require_todo_before_development_action(
+            "main.rs を改善して",
+            &commands,
+            dir.path()
+        ));
+    }
+
+    #[test]
+    fn development_action_allows_existing_todo_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(crate::executor::LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todos = vec![crate::command::TodoItem {
+            id: "1".into(),
+            content: "実装する".into(),
+            status: crate::command::TodoStatus::InProgress,
+        }];
+        std::fs::write(
+            log_dir.join(todo_write::TODO_FILE),
+            serde_json::to_string_pretty(&todos).unwrap(),
+        )
+        .unwrap();
+        let commands = vec![AiCommand::Edit {
+            path: "src/main.rs".into(),
+            old_string: "old".into(),
+            new_string: "new".into(),
+        }];
+
+        assert!(!should_require_todo_before_development_action(
+            "main.rs を改善して",
+            &commands,
+            dir.path()
+        ));
+    }
+
+    #[test]
+    fn development_action_requires_new_todo_when_previous_todo_is_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(crate::executor::LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todos = vec![crate::command::TodoItem {
+            id: "1".into(),
+            content: "前回の実装".into(),
+            status: crate::command::TodoStatus::Completed,
+        }];
+        std::fs::write(
+            log_dir.join(todo_write::TODO_FILE),
+            serde_json::to_string_pretty(&todos).unwrap(),
+        )
+        .unwrap();
+        let commands = vec![AiCommand::Edit {
+            path: "src/main.rs".into(),
+            old_string: "old".into(),
+            new_string: "new".into(),
+        }];
+
+        assert!(should_require_todo_before_development_action(
+            "main.rs を改善して",
+            &commands,
+            dir.path()
+        ));
     }
 
     #[test]
@@ -1847,6 +2083,7 @@ mod tests {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
         });
 
         match outcome {
@@ -1948,6 +2185,7 @@ mod tests {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
         });
 
         match outcome {
@@ -1981,6 +2219,7 @@ mod tests {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
         });
         match outcome {
             TurnOutcome::NudgeForJson { prompt } => {
@@ -2012,6 +2251,7 @@ mod tests {
             consecutive_ask_user: 0,
             consecutive_edit_fail: 0,
             last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
         });
         assert!(
             matches!(outcome, TurnOutcome::Continue { .. }),

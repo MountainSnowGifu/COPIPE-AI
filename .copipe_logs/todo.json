@@ -1,0 +1,17 @@
+[
+  {
+    "id": "1",
+    "content": "Cargo.toml のパッケージ名を確認する",
+    "status": "completed"
+  },
+  {
+    "id": "2",
+    "content": "テストが参照しているクレート名と Cargo.toml の package.name を一致させる（必要なら修正）",
+    "status": "completed"
+  },
+  {
+    "id": "3",
+    "content": "修正後に cargo check --tests を実行してテストのコンパイルを確認する",
+    "status": "in_progress"
+  }
+]

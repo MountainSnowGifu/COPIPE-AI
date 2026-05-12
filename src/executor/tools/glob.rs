@@ -87,7 +87,11 @@ pub fn handle(ctx: &ToolContext<'_>, pattern: &str) -> ToolResult {
             results.len()
         ));
     } else {
-        output.push_str(&format!("\n\n[{} ファイル]", results.len()));
+        output.push_str(&format!(
+            "\n\n[{} ファイル。これ以外に '{}' に一致するファイルは存在しません]",
+            results.len(),
+            pattern
+        ));
     }
 
     ToolResult::new(format!("Glob({pattern})"), output)

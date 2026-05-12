@@ -21,7 +21,7 @@ impl<'a> ToolContext<'a> {
             root,
             read_files,
             turn_read_chars: 0,
-            max_turn_read: 15_000,
+            max_turn_read: 7_000,
             checkpoints,
         }
     }

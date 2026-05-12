@@ -24,11 +24,8 @@ pub fn run(tool_name: &str, result: ToolResult) -> ToolResult {
 /// ツールごとの出力文字数上限
 /// format_tool_results の「合計」制限とは別に「1件あたり」を制限する
 fn hook_limit_output(tool_name: &str, mut result: ToolResult) -> ToolResult {
-    let limit = match tool_name {
-        "cmd" => 8_000,      // cargo build 等は stdout/stderr が巨大になりやすい
-        "read_log" => 8_000, // ログは末尾 32KB 読むが念のため
-        _ => 12_000,         // その他（read_file はバジェット管理で既に制限済み）
-    };
+    let limit: usize = 7_000; // 全ツール共通—AIに渡す01件あたり上限、1発分超えた分は read_log で分割取得
+    let _ = tool_name; // 将来的なツール別カスタマイズ用に残す
 
     if result.output.chars().count() > limit {
         let truncated: String = result.output.chars().take(limit).collect();
@@ -39,13 +36,23 @@ fn hook_limit_output(tool_name: &str, mut result: ToolResult) -> ToolResult {
             .unwrap_or(truncated.len());
         let kept = &truncated[..safe_end];
         let continuation = if tool_name == "cmd" {
-            "\n続きの出力は次で確認できます:\n```json\n{\"type\":\"read_log\",\"filename\":\"cmd_log\"}\n```".to_string()
+            // kept の行数を渡すことで read_log がその行以降から返せる。
+            // cmd_log はヘッダ行 + 出力行 の構造なので +1 してヘッダをスキップする。
+            let shown_lines = kept.lines().count() + 1;
+            format!(
+                "\n続きの出力は次で確認できます:\n```json\n{{\"type\":\"read_log\",\"filename\":\"cmd_log\",\"offset_lines\":{shown_lines}}}\n```"
+            )
         } else if tool_name == "read_log" {
             // label 例: "ReadLog(cmd_log)" or "ReadLog(cmd_log@50)"
             let next_hint = read_log_continuation_hint(&result.label, kept);
             format!("\n{next_hint}")
+        } else if tool_name == "read_file" {
+            // label 例: "ReadFile(src/main.rs)" or "ReadFile(src/main.rs@100)"
+            read_file_continuation_hint_from_label(&result.label, kept)
         } else {
-            String::new()
+            // grep / glob / list_dir / web_fetch など — ページネーション不可
+            "\n[出力が長いため一部を省略しました。より絞り込んだ条件で再実行してください]"
+                .to_string()
         };
         result.output =
             format!("{kept}\n[出力が {limit} 文字を超えたため省略しました]{continuation}");
@@ -73,6 +80,29 @@ fn read_log_continuation_hint(label: &str, kept: &str) -> String {
     let next_offset = base_offset + shown_lines;
     format!(
         "続きは次で確認できます:\n```json\n{{\"type\":\"read_log\",\"filename\":\"{filename}\",\"offset_lines\":{next_offset}}}\n```"
+    )
+}
+
+/// ReadFile の label から path と現在の offset を取り出し、次の継続ヒントを生成する
+fn read_file_continuation_hint_from_label(label: &str, kept: &str) -> String {
+    // label: "ReadFile(src/main.rs)" or "ReadFile(src/main.rs@100)"
+    let inner = label
+        .strip_prefix("ReadFile(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or("");
+    if inner.is_empty() {
+        return String::new();
+    }
+    let (path, base_offset) = match inner.rsplit_once('@') {
+        Some((p, off)) if off.chars().all(|c| c.is_ascii_digit()) => {
+            (p, off.parse::<usize>().unwrap_or(0))
+        }
+        _ => (inner, 0),
+    };
+    let shown_lines = kept.lines().count();
+    let next_offset = base_offset + shown_lines;
+    format!(
+        "\n続きは次で取得できます:\n```json\n{{\"type\":\"read_file\",\"path\":\"{path}\",\"offset_lines\":{next_offset}}}\n```"
     )
 }
 

@@ -63,18 +63,14 @@ pub fn safe_append_log(path: &Path, content: &str) {
 }
 
 pub fn now_timestamp() -> String {
-    let offset_hours: i64 = std::env::var("TZ")
-        .ok()
-        .and_then(|tz| {
-            if tz.contains("Tokyo") || tz.contains("JST") {
-                Some(9)
-            } else if tz == "UTC" || tz == "GMT" {
-                Some(0)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(9);
+    // TZ 未設定 → 日本環境デフォルト JST。TZ が設定されているが未知の値 → UTC
+    // （例: TZ=America/New_York のとき予期せず JST になることを防ぐ）
+    let offset_hours: i64 = match std::env::var("TZ").ok().as_deref() {
+        None | Some("") => 9,
+        Some(tz) if tz.contains("Tokyo") || tz.contains("JST") => 9,
+        Some(tz) if tz == "UTC" || tz == "GMT" => 0,
+        Some(_) => 0,
+    };
     let utc_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -353,7 +349,7 @@ pub async fn execute(
 }
 
 pub fn format_tool_results(results: &[ToolResult]) -> String {
-    const MAX_TOTAL_CHARS: usize = 8_000;
+    const MAX_TOTAL_CHARS: usize = 7_000;
     let mut parts = vec!["[ツール実行結果]".to_string()];
     let mut used = parts[0].len();
     let total = results.len();
@@ -460,7 +456,7 @@ mod tests {
 
     #[test]
     fn oversized_single_result_keeps_read_file_continuation_hint() {
-        let mut output = "x\n".repeat(10_000); // 20,000 chars -> 8,000 制限を超える
+        let mut output = "x\n".repeat(10_000); // 20,000 chars -> 7,000 制限を超える
         output.push_str(
             "\n[残り 10 行。続きは {\"type\":\"read_file\",\"path\":\"src/agent/runner.rs\",\"offset_lines\":300} で取得]",
         );
@@ -468,7 +464,7 @@ mod tests {
 
         let formatted = format_tool_results(&[result]);
 
-        assert!(formatted.chars().count() <= 8_000);
+        assert!(formatted.chars().count() <= 7_000);
         assert!(formatted.contains("\"offset_lines\":300"));
         assert!(formatted.contains("一部を省略"));
         assert!(!formatted.contains("残り 1 件の結果を省略"));

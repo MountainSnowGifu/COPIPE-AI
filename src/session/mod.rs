@@ -32,7 +32,7 @@ fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
 
 // ─── プロンプト分割 ───────────────────────────────────────────────────────────
 
-const PROMPT_CHUNK_SIZE: usize = 30_000;
+const PROMPT_CHUNK_SIZE: usize = 7_000;
 
 fn split_prompt(text: &str) -> Vec<String> {
     if text.len() <= PROMPT_CHUNK_SIZE {
@@ -160,6 +160,11 @@ impl CopilotSession {
         tokio::time::sleep(jitter(600, 400)).await;
 
         // テキスト入力: React setter を主軸にしつつ追加イベントで React state を確実に更新
+        {
+            use std::io::Write as _;
+            eprint!("\r  Copilot へ入力中...          ");
+            std::io::stderr().flush().ok();
+        }
         let js_str = serde_json::to_string(prompt)?;
         page.evaluate_expression(&format!(
             "({})({})",

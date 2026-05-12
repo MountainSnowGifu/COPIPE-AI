@@ -23,9 +23,10 @@ pub fn use_unicode() -> bool {
         // 標準 cmd.exe ではボックス描画文字が文字化けする場合があるため無効
         return false;
     }
-    // LC_ALL/LANG が UTF-8 系か、TERM が明示的にサポートしている場合のみ true
+    // LC_ALL / LC_CTYPE / LANG が UTF-8 系か、TERM が明示的にサポートしている場合のみ true
     let ok = |v: &str| v.contains("UTF") || v.contains("utf");
     std::env::var("LC_ALL").map(|v| ok(&v)).unwrap_or(false)
+        || std::env::var("LC_CTYPE").map(|v| ok(&v)).unwrap_or(false)
         || std::env::var("LANG").map(|v| ok(&v)).unwrap_or(false)
         || std::env::var("TERM")
             .map(|v| v == "xterm-256color" || v.contains("xterm"))

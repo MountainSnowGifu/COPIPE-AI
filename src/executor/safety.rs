@@ -37,38 +37,41 @@ const ALLOWED_GIT_SUBCMDS: &[&str] = &[
 ];
 
 /// cargo で許可するサブコマンド
-/// 注意: build / check / clippy / doc も build.rs・proc macro・コンパイラプラグイン経由で
-/// 任意コードを実行し得る。untrusted リポジトリへの使用は本質的にリスクを伴う。
-/// run / test / bench / fix は加えてバイナリ・テストコードも実行するため除外。
-const ALLOWED_CARGO_SUBCMDS: &[&str] = &["build", "check", "fmt", "clippy", "doc", "clean"];
+/// 注意: check / clippy / doc も build.rs・proc macro 経由で任意コードを実行し得る。
+/// build は加えてバイナリ生成まで行うため除外。untrusted リポジトリへの使用は本質的にリスクを伴う。
+const ALLOWED_CARGO_SUBCMDS: &[&str] = &["check", "fmt", "clippy", "doc", "clean"];
 
 /// cargo で明示的に拒否するサブコマンド（任意コード実行の恐れ）
-const BLOCKED_CARGO_SUBCMDS: &[&str] = &["run", "test", "bench", "fix", "install", "publish"];
+const BLOCKED_CARGO_SUBCMDS: &[&str] = &[
+    "build", "run", "test", "bench", "fix", "install", "publish",
+];
 
 /// cabal で許可するサブコマンド
 /// run / test / bench / exec は任意コードを実行するため除外。
-const ALLOWED_CABAL_SUBCMDS: &[&str] = &[
-    "build", "check", "clean", "haddock", "sdist", "info", "list", "freeze",
-];
+/// build / haddock は Setup.hs・カスタムセットアップ経由で任意コードを実行し得るため除外。
+const ALLOWED_CABAL_SUBCMDS: &[&str] = &["check", "clean", "sdist", "info", "list", "freeze"];
 
 /// cabal で明示的に拒否するサブコマンド（任意コード実行の恐れ）
 const BLOCKED_CABAL_SUBCMDS: &[&str] = &[
-    "run", "test", "bench", "exec", "install", "upload", "publish",
+    "build", "haddock", "run", "test", "bench", "exec", "install", "upload", "publish",
 ];
 
 /// stack で許可するサブコマンド
 /// run / test / exec / script / ghci はバイナリ・テストコードを実行するため除外。
-const ALLOWED_STACK_SUBCMDS: &[&str] = &[
-    "build", "clean", "haddock", "sdist", "ls", "query", "path", "dot", "ide",
-];
+/// build / haddock は Setup.hs・Template Haskell 経由で任意コードを実行し得るため除外。
+const ALLOWED_STACK_SUBCMDS: &[&str] = &["clean", "sdist", "ls", "query", "path", "dot", "ide"];
 
 /// stack で明示的に拒否するサブコマンド（任意コード実行の恐れ）
 const BLOCKED_STACK_SUBCMDS: &[&str] = &[
-    "run", "test", "bench", "exec", "ghci", "repl", "script", "install", "upload", "publish",
+    "build", "haddock", "run", "test", "bench", "exec", "ghci", "repl", "script", "install",
+    "upload", "publish",
 ];
 
 /// npm で許可するサブコマンド
 /// run / exec / start / test はpackage.jsonの任意スクリプトを実行するため除外。
+/// install / ci / pack は preinstall / postinstall / prepack 等のライフサイクルスクリプトを
+/// 実行し得るが、--ignore-scripts を cmd.rs 側で自動付加することで許可する。
+pub const NPM_INSTALL_SUBCMDS: &[&str] = &["install", "ci", "pack"];
 const ALLOWED_NPM_SUBCMDS: &[&str] = &[
     "install", "ci", "list", "ls", "audit", "outdated", "view", "info", "show", "pack",
 ];
@@ -224,6 +227,54 @@ pub fn check_cmd_safety(cmd: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// ファイル引数を取るコマンドについて、引数がシンボリックリンク経由でルート外を指していないか確認する。
+/// workdir から相対パスで解決し、canonicalize 後に root 内に収まっているかチェックする。
+/// ファイルパスを引数に取らないコマンド（echo/printf/date/where）だけを除外し、
+/// それ以外の許可コマンド全体に適用することで sort/cut/uniq 等の迂回を防ぐ。
+pub fn check_file_args_within_root(
+    cmd: &[String],
+    workdir: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<(), String> {
+    // ファイルパスを引数に取らないコマンドのみ除外（引数が文字列リテラル・書式・コマンド名のみ）
+    const NO_FILE_ARG_CMDS: &[&str] = &["echo", "printf", "date", "where"];
+    let exe = cmd.first().map(|s| s.as_str()).unwrap_or("");
+    if NO_FILE_ARG_CMDS.contains(&exe) {
+        return Ok(());
+    }
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|e| format!("Permission denied: root の解決失敗: {e}"))?;
+    for arg in &cmd[1..] {
+        // フラグ・空文字はスキップ
+        if arg.starts_with('-') || arg.is_empty() {
+            continue;
+        }
+        // 絶対パスは check_cmd_safety で拒否済みのためスキップ
+        if std::path::Path::new(arg).is_absolute() {
+            continue;
+        }
+        let candidate = workdir.join(arg);
+        if candidate.exists() {
+            match candidate.canonicalize() {
+                Ok(canonical) => {
+                    if !canonical.starts_with(&root_canonical) {
+                        return Err(format!(
+                            "Permission denied: '{arg}' はプロジェクトルート外を指しています（シンボリックリンク経由の可能性）"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Permission denied: '{arg}' のパス解決に失敗しました: {e}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn blocked_cargo_subcmd_message(subcmd: &str) -> String {
     let mut message = format!(
         "Permission denied: 'cargo {subcmd}' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です"
@@ -261,5 +312,66 @@ mod tests {
         ];
 
         assert!(check_cmd_safety(&cmd).is_ok());
+    }
+
+    #[test]
+    fn cargo_build_is_blocked() {
+        let cmd = vec!["cargo".to_string(), "build".to_string()];
+        assert!(check_cmd_safety(&cmd).is_err());
+    }
+
+    fn make_symlink_outside_root() -> (tempfile::TempDir, tempfile::NamedTempFile) {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::NamedTempFile::new().unwrap();
+        let link = dir.path().join("secret");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+        (dir, target)
+    }
+
+    #[test]
+    fn check_file_args_blocks_symlink_outside_root_for_cat() {
+        let (dir, _target) = make_symlink_outside_root();
+        let cmd = vec!["cat".to_string(), "secret".to_string()];
+        assert!(
+            check_file_args_within_root(&cmd, dir.path(), dir.path()).is_err(),
+            "cat: symlink outside root must be blocked"
+        );
+    }
+
+    #[test]
+    fn check_file_args_blocks_symlink_outside_root_for_sort() {
+        let (dir, _target) = make_symlink_outside_root();
+        let cmd = vec!["sort".to_string(), "secret".to_string()];
+        assert!(
+            check_file_args_within_root(&cmd, dir.path(), dir.path()).is_err(),
+            "sort: symlink outside root must be blocked"
+        );
+    }
+
+    #[test]
+    fn check_file_args_blocks_symlink_outside_root_for_cut() {
+        let (dir, _target) = make_symlink_outside_root();
+        let cmd = vec!["cut".to_string(), "-c1-".to_string(), "secret".to_string()];
+        assert!(
+            check_file_args_within_root(&cmd, dir.path(), dir.path()).is_err(),
+            "cut: symlink outside root must be blocked"
+        );
+    }
+
+    #[test]
+    fn check_file_args_allows_file_within_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "hello").unwrap();
+
+        let cmd = vec!["cat".to_string(), "README.md".to_string()];
+        assert!(check_file_args_within_root(&cmd, dir.path(), dir.path()).is_ok());
+    }
+
+    #[test]
+    fn check_file_args_skips_echo_args() {
+        // echo の引数はファイルパスではないのでチェック不要（存在しない名前でもエラーなし）
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = vec!["echo".to_string(), "hello world".to_string()];
+        assert!(check_file_args_within_root(&cmd, dir.path(), dir.path()).is_ok());
     }
 }

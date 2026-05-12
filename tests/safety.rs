@@ -2,8 +2,15 @@ use copipe_ai::executor::safety::check_cmd_safety;
 
 #[test]
 fn allowed_command_passes() {
-    let cmd = vec!["cargo".to_string(), "build".to_string()];
+    // cargo build はバイナリ生成まで行うため blocked。check は許可。
+    let cmd = vec!["cargo".to_string(), "check".to_string()];
     assert!(check_cmd_safety(&cmd).is_ok());
+}
+
+#[test]
+fn cargo_build_blocked() {
+    let cmd = vec!["cargo".to_string(), "build".to_string()];
+    assert!(check_cmd_safety(&cmd).is_err());
 }
 
 #[test]
@@ -88,8 +95,15 @@ fn hlint_allowed() {
 }
 
 #[test]
-fn cabal_build_allowed() {
+fn cabal_build_blocked() {
+    // cabal build は Setup.hs 経由で任意コードを実行し得るため blocked
     let cmd = vec!["cabal".to_string(), "build".to_string()];
+    assert!(check_cmd_safety(&cmd).is_err());
+}
+
+#[test]
+fn cabal_list_allowed() {
+    let cmd = vec!["cabal".to_string(), "list".to_string()];
     assert!(check_cmd_safety(&cmd).is_ok());
 }
 
@@ -106,8 +120,15 @@ fn cabal_test_blocked() {
 }
 
 #[test]
-fn stack_build_allowed() {
+fn stack_build_blocked() {
+    // stack build は Template Haskell / Setup.hs 経由で任意コードを実行し得るため blocked
     let cmd = vec!["stack".to_string(), "build".to_string()];
+    assert!(check_cmd_safety(&cmd).is_err());
+}
+
+#[test]
+fn stack_ls_allowed() {
+    let cmd = vec!["stack".to_string(), "ls".to_string()];
     assert!(check_cmd_safety(&cmd).is_ok());
 }
 

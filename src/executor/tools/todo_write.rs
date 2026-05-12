@@ -21,7 +21,15 @@ pub fn init_empty(root: &Path) -> std::io::Result<()> {
         ));
     }
 
-    if !todo_path.exists() {
+    let should_initialize = if todo_path.exists() {
+        std::fs::read_to_string(&todo_path)
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+
+    if should_initialize {
         std::fs::write(todo_path, "[]\n")?;
     }
 
@@ -71,7 +79,7 @@ pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
         Ok(s) => s,
         Err(e) => return ToolResult::new("TodoWrite", format!("ERROR: シリアライズ失敗: {e}")),
     };
-    if std::fs::write(&todo_path, &json).is_err() {
+    if std::fs::write(&todo_path, format!("{json}\n")).is_err() {
         return ToolResult::new("TodoWrite", "ERROR: todo.json への書き込みに失敗しました。");
     }
 
@@ -286,5 +294,18 @@ mod tests {
             std::fs::read_to_string(todo_path).unwrap(),
             "[{\"id\":\"1\"}]\n"
         );
+    }
+
+    #[test]
+    fn test_init_empty_repairs_zero_byte_todo_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todo_path = log_dir.join(TODO_FILE);
+        std::fs::write(&todo_path, "").unwrap();
+
+        init_empty(dir.path()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(todo_path).unwrap(), "[]\n");
     }
 }

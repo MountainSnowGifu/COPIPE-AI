@@ -12,9 +12,9 @@ use session::CopilotSession;
 
 // #6: セクション分けされたヘルプ + #9: Ctrl+C 明記
 fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
-    let v_state = if verbose { "ON " } else { "OFF" };
-    let y_state = if auto_confirm { "ON " } else { "OFF" };
-    let d_state = if debug { "ON " } else { "OFF" };
+    let v_state = if verbose { "ON" } else { "OFF" };
+    let y_state = if auto_confirm { "ON" } else { "OFF" };
+    let d_state = if debug { "ON" } else { "OFF" };
 
     println!("{BOLD}── コマンド ─────────────────────────────────{RESET}");
     println!("  {BOLD}:h{RESET}       このヘルプを表示");
@@ -24,8 +24,10 @@ fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
     );
     println!("  {BOLD}:y{RESET}       自動確認モード切替     (現在: {BOLD}{y_state}{RESET})");
     println!("  {BOLD}:undo{RESET}    直前のファイル変更を元に戻す");
-    println!("  {BOLD}:undo list{RESET} チェックポイント一覧を表示");
-    println!("  {BOLD}exit{RESET}     終了  (Ctrl+D でも可)");
+    println!("  {BOLD}:undo N{RESET}  N番目のチェックポイントを復元  例: :undo 0 (最新) / :undo 2");
+    println!("  {BOLD}:undo list{RESET} チェックポイント一覧を表示  (:undo list で確認後に :undo N で復元)");
+    println!("  {BOLD}:resume{RESET}  前回の未完了タスクを再開  (MAX_TURNS 到達後に使用)");
+    println!("  {BOLD}exit / quit{RESET} 終了  (Ctrl+D でも可)");
     println!();
     println!("{BOLD}── タスクの書き方 ───────────────────────────{RESET}");
     println!("  日本語でタスクを入力して Enter");
@@ -34,7 +36,7 @@ fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
     println!();
     println!("{BOLD}── キー操作 ─────────────────────────────────{RESET}");
     println!("  {BOLD}Enter{RESET}    タスク確認プロンプトで実行");
-    println!("  {BOLD}Ctrl+C{RESET}   実行中のタスクをキャンセル（生成も停止）");
+    println!("  {BOLD}Ctrl+C{RESET}   実行中: タスクをキャンセル（ブラウザの生成も停止）/ 入力中: 入力をクリア");
     println!("  {BOLD}Ctrl+D{RESET}   終了");
     println!();
     println!("{BOLD}── 動作要件 ─────────────────────────────────{RESET}");
@@ -46,6 +48,16 @@ fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
     println!("{DIM}  src の構成を調べてください{RESET}");
     println!("{DIM}  main.rs を読んで TODO を一覧にしてください{RESET}");
     println!("{DIM}  cargo check して失敗したら修正してください{RESET}");
+}
+
+/// 端末の列幅を返す。COLUMNS 環境変数 → デフォルト80。
+fn terminal_columns() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&w| w > 20)
+        .map(|w| w.min(120))
+        .unwrap_or(80)
 }
 
 #[tokio::main]
@@ -79,8 +91,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false)
     {
         anyhow::bail!(
-            "{} はシンボリックリンクです。untrusted リポジトリによるログ外部書き込みを防ぐため起動を中止します。",
-            log_dir.display()
+            "{dir} はシンボリックリンクです。untrusted リポジトリによるログ外部書き込みを防ぐため起動を中止します。\n解決方法: rm '{dir}' を実行してから再起動してください",
+            dir = log_dir.display()
         );
     }
     std::fs::create_dir_all(&log_dir).ok();
@@ -94,8 +106,8 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false)
         {
             anyhow::bail!(
-                "{} はシンボリックリンクです。外部ファイルへのログ書き込みを防ぐため起動を中止します。",
-                log_path.display()
+                "{p} はシンボリックリンクです。外部ファイルへのログ書き込みを防ぐため起動を中止します。\n解決方法: rm '{p}' を実行してから再起動してください",
+                p = log_path.display()
             );
         }
         std::fs::write(&log_path, "").ok();
@@ -120,10 +132,17 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ("+", "+", "+", "+", "-", "|")
     };
-    let line = h.repeat(50);
+    let banner_w = terminal_columns().saturating_sub(2).clamp(40, 78);
+    let line = h.repeat(banner_w);
+    let title = "COPIPE-AI  - AI Dev Assistant";
+    let pad = banner_w.saturating_sub(title.len());
+    let lpad = pad / 2;
+    let rpad = pad - lpad;
     println!("{CYAN_BOLD}{tl}{line}{tr}{RESET}");
     println!(
-        "{CYAN_BOLD}{v}{RESET}         {BOLD}COPIPE-AI  - AI Dev Assistant{RESET}          {CYAN_BOLD}{v}{RESET}"
+        "{CYAN_BOLD}{v}{RESET}{}{BOLD}{title}{RESET}{}{CYAN_BOLD}{v}{RESET}",
+        " ".repeat(lpad),
+        " ".repeat(rpad),
     );
     println!("{CYAN_BOLD}{bl}{line}{br}{RESET}");
     println!("プロジェクト: {BOLD}{}{RESET}", root.display());
@@ -166,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
     if session_store.exists() {
         if let Some(ref prev) = session_store.load() {
             println!(
-                "{YELLOW}前回の未完了セッションがあります: 「{}」（{}ターン完了済み / {}）{RESET}",
+                "{YELLOW}前回の未完了セッション: 「{}」（{}ターン完了 / 保存: {}）{RESET}",
                 prev.user_task, prev.turn_count, prev.saved_at
             );
             println!(
@@ -188,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
         let base_prompt: &str = &{
             let mut tags: Vec<&str> = Vec::new();
             if in_worktree {
-                tags.push("worktree");
+                tags.push("WT");
             }
             if auto_confirm {
                 tags.push("自動確認");
@@ -307,6 +326,22 @@ async fn main() -> anyhow::Result<()> {
             _ => {}
         }
 
+        // `:resume` → 前回セッションのタスクに置き換えて実行
+        let task = if task == ":resume" {
+            match session_store.load() {
+                None => {
+                    println!("{YELLOW}再開できるセッションがありません{RESET}");
+                    continue 'repl;
+                }
+                Some(prev) => {
+                    println!("{DIM}「{}」を再開します{RESET}", prev.user_task);
+                    prev.user_task
+                }
+            }
+        } else {
+            task
+        };
+
         // タスク末尾の :y で1回だけ確認スキップ
         let (task, skip_confirm) = if task.ends_with(":y") {
             (task[..task.len() - 2].trim().to_string(), true)
@@ -315,18 +350,26 @@ async fn main() -> anyhow::Result<()> {
         };
 
         // ── 確認ステップ ──────────────────────────────────────────────
-        println!("┌─ タスク ─────────────────────────────────────────");
-        for line in task.lines() {
-            println!("│ {line}");
+        {
+            // タスク内容に合わせてボックス幅を動的に計算
+            let content_w = task.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+            let box_w = content_w.clamp(20, terminal_columns().saturating_sub(4));
+            // "┌─ タスク " = 6 表示文字分、残りを ─ で埋める
+            let header_fill = "─".repeat(box_w.saturating_sub(6));
+            let bot_line = "─".repeat(box_w);
+            println!("┌─ タスク {header_fill}");
+            for line in task.lines() {
+                println!("│ {line}");
+            }
+            println!("└{bot_line}");
         }
-        println!("└──────────────────────────────────────────────────");
 
         if !auto_confirm && !skip_confirm {
             // #3: Enter=実行 / n=中止 を明示
             let confirmed = 'confirm: loop {
                 match rl.readline("実行しますか? [Enter=実行 / n=中止] ") {
                     Ok(ans) => match ans.trim() {
-                        "" | "y" | "Y" => break 'confirm Some(true),
+                        "" => break 'confirm Some(true),
                         "n" | "N" => break 'confirm Some(false),
                         other => {
                             println!("{DIM}「{other}」は無効です。Enter で実行、n で中止{RESET}")
@@ -371,8 +414,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = tokio::signal::ctrl_c() => {
+                use std::io::Write as _;
+                print!("\n{YELLOW}キャンセル中...{RESET}");
+                std::io::stdout().flush().ok();
                 session.stop_generation().await;
-                println!("\n{YELLOW}キャンセルしました{RESET}");
+                println!("\r{YELLOW}キャンセルしました    {RESET}");
             }
         }
     }

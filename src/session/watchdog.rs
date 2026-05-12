@@ -155,9 +155,8 @@ pub(super) async fn wait_for_ai_message_count(
                 .unwrap_or_else(|| "{}".to_string());
             write_diag_log(log_dir, &format!("[診断] {input_state}"));
             if let Some(reason) = detect_copilot_block(page).await {
-                eprintln!("\n応答が停止しました。同じタスクを再入力してください");
                 anyhow::bail!(
-                    "Copilot との接続が切れました（{reason}）。同じタスクを再入力してください"
+                    "応答が停止しました（{reason}）。同じタスクを再入力してください"
                 );
             }
         }
@@ -194,7 +193,7 @@ pub(super) async fn wait_for_stable_text(
         if !text.is_empty() && text == last {
             stable += 1;
             eprint!(
-                "\r  {} 確定中 ({}/{STABLE_NEEDED})          ",
+                "\r  {} 受信確認中 ({}/{STABLE_NEEDED})          ",
                 spin(tick),
                 stable
             );

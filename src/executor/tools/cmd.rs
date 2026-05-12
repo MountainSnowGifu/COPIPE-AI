@@ -1,7 +1,24 @@
 use crate::executor::context::ToolContext;
-use crate::executor::safety::check_cmd_safety;
+use crate::executor::safety::{NPM_INSTALL_SUBCMDS, check_cmd_safety, check_file_args_within_root};
 use crate::executor::{LOG_DIR, ToolResult, now_timestamp, safe_append_log};
 use std::time::Duration;
+
+/// npm install/ci/pack に --ignore-scripts を自動付加してライフサイクルスクリプトを抑制する
+fn inject_npm_ignore_scripts(cmd: &[String]) -> Vec<String> {
+    if cmd.first().map(|s| s.as_str()) != Some("npm") {
+        return cmd.to_vec();
+    }
+    let subcmd = cmd.get(1).map(|s| s.as_str()).unwrap_or("");
+    if !NPM_INSTALL_SUBCMDS.contains(&subcmd) {
+        return cmd.to_vec();
+    }
+    if cmd.iter().any(|a| a == "--ignore-scripts") {
+        return cmd.to_vec();
+    }
+    let mut v = cmd.to_vec();
+    v.push("--ignore-scripts".to_string());
+    v
+}
 
 pub async fn handle(
     ctx: &ToolContext<'_>,
@@ -30,6 +47,14 @@ pub async fn handle(
             },
             None => ctx.root.to_path_buf(),
         };
+
+        // ファイル引数のシンボリックリンク経由ルート外アクセスを検出
+        if let Err(e) = check_file_args_within_root(cmd, &workdir_path, ctx.root) {
+            return ToolResult::new(format!("Cmd({name})"), e);
+        }
+
+        // npm install/ci/pack は --ignore-scripts を強制付加
+        let cmd = inject_npm_ignore_scripts(cmd);
 
         let child = tokio::process::Command::new(&cmd[0])
             .args(&cmd[1..])
@@ -71,7 +96,8 @@ pub async fn handle(
         }
     };
 
-    // cmd_log に追記
+    // cmd_log に完全な出力を記録する。AI への分割配信は hooks.rs の hook_limit_output が担う
+    // （先頭チャンクを返し、続きは read_log("cmd_log") でページネーション）
     let log_dir = ctx.root.join(LOG_DIR);
     std::fs::create_dir_all(&log_dir).ok();
     let entry = format!(
