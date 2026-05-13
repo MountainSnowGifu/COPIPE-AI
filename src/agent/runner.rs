@@ -8,10 +8,11 @@ use super::parser::{SCHEMA_HINT, parse_blocks};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{CompletionSummary, SessionData, SessionStore};
 use super::task::{
-    is_ambiguous_file_fill_request, is_menu_selection_without_context, is_non_actionable_ack,
-    is_short_open_ended_development_task, should_short_circuit_non_actionable_task,
-    should_short_circuit_read_status_task, task_mentions_explicit_filename,
-    task_requires_development_action, task_requires_file_split, task_requires_review_output,
+    initial_command_request, is_ambiguous_file_fill_request, is_menu_selection_without_context,
+    is_non_actionable_ack, is_short_open_ended_development_task,
+    should_short_circuit_non_actionable_task, should_short_circuit_read_status_task,
+    task_mentions_explicit_filename, task_requires_development_action, task_requires_file_split,
+    task_requires_review_output,
 };
 use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET, YELLOW};
 use crate::command::AiCommand;
@@ -346,6 +347,32 @@ fn build_initial_prompt(user_task: &str, prev_completion: Option<&CompletionSumm
         現在の環境における事実として扱ってください（それ以外の過去チャット文脈は参照不要）。\n\n"
     };
 
+    if let Some(request) = initial_command_request(user_task) {
+        let cmd_json = request
+            .cmd
+            .iter()
+            .map(|part| format!("\"{part}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        return format!(
+            "{boundary}{prev_ctx}{user_task}\n\n\
+            [明示コマンド依頼]\n\
+            ユーザーは `{}` の実行を明示しています。\
+            最初の返答では、glob/read_file/grep で調査せず、必ず `txt` と `cmd` だけを返してください。\
+            コマンドが成功し、ユーザーが修正まで依頼していない場合は、追加調査せず結果を `bot` で報告してください。\
+            失敗した場合、または「失敗したら修正」「修正して」も依頼されている場合だけ、次ターンで cmd_log のエラーを根拠に必要なファイルを読んで修正してください。\
+            許可されないコマンドだった場合は、勝手に推測調査へ移らず、実行不可の理由と代替の安全な確認方法を `bot` で報告してください。\
+            最初の返答は必ず次の形の JSON コードブロックにしてください:\n\
+            ```json\n\
+            [\n\
+              {{\"type\":\"txt\",\"content\":\"計画: 明示されたコマンドを実行し、失敗した場合だけ結果に基づいて次の対応を判断します\"}},\n\
+              {{\"type\":\"cmd\",\"name\":\"{}\",\"cmd\":[{}],\"workdir\":\".\",\"timeout\":{}}}\n\
+            ]\n\
+            ```",
+            request.name, request.name, cmd_json, request.timeout
+        );
+    }
+
     if task_requires_review_output(user_task) {
         return format!(
             "{boundary}{prev_ctx}{user_task}\n\n\
@@ -385,8 +412,11 @@ fn build_initial_prompt(user_task: &str, prev_completion: Option<&CompletionSumm
     } else if task_requires_development_action(user_task) {
         "次のアクションを必ず ```json コードブロックで返してください。\
         最初にツールを実行する前に `txt` で「計画:」から始まる短い方針を書いてください。\
-        まず `glob` で現在のプロジェクト構成を把握し、`grep` で対象を絞り込んでから `read_file` してください。\
-        対象が見えたら編集前に `todo_write` で TODO.JSON に実行計画を作成し、進捗を管理しながら進めてください。"
+        コーディング依頼として、調査→実装→検証の順で自律的に進めてください。\
+        まず `glob` で現在のプロジェクト構成を把握し、必要に応じて `grep` で対象を絞り込んでから関連ファイルだけを `read_file` してください。\
+        対象が見えたら、編集前に `todo_write` で TODO.JSON に実行計画を作成し、1件を `in_progress` にして進めてください。\
+        変更後はプロジェクト種別に合う安全な検証コマンド（Rust なら `cargo check`、TypeScript なら `tsc --noEmit` など）を実行してください。\
+        依頼が抽象的でも、追加質問で止めず、現在のコードベースから最小で保守的な改善を選んで実装してください。"
     } else {
         "次のアクションを必ず ```json コードブロックで返してください。\
         最初にツールを実行する前に `txt` で「計画:」から始まる短い方針を書いてください。\
@@ -1324,7 +1354,60 @@ mod tests {
         assert!(prompt.contains("ログは失敗パターンの診断材料"));
         assert!(prompt.contains("ログ内の作業対象・crate 名・ファイル名・実行結果"));
         assert!(prompt.contains(task));
-        assert!(prompt.contains("```json コードブロック"));
+        assert!(prompt.contains("[明示コマンド依頼]"));
+        assert!(prompt.contains("\"cmd\":[\"cargo\",\"check\"]"));
+    }
+
+    #[test]
+    fn cargo_check_request_is_classified_as_command_request() {
+        assert!(matches!(
+            initial_command_request("cargo check して"),
+            Some(request) if request.cmd == ["cargo", "check"]
+        ));
+        assert!(matches!(
+            initial_command_request("カーゴチェックして"),
+            Some(request) if request.cmd == ["cargo", "check"]
+        ));
+        assert!(initial_command_request("cargo fmt して").is_some());
+        assert!(initial_command_request("git status 見て").is_some());
+        assert!(initial_command_request("型チェックして").is_some());
+        assert!(!task_requires_review_output("cargo check して"));
+        assert!(!task_requires_review_output("カーゴチェックして"));
+    }
+
+    #[test]
+    fn initial_prompt_for_cargo_check_runs_command_first() {
+        let prompt = build_initial_prompt("カーゴチェックして", None);
+
+        assert!(prompt.contains("[明示コマンド依頼]"));
+        assert!(prompt.contains("\"type\":\"cmd\""));
+        assert!(prompt.contains("\"cmd\":[\"cargo\",\"check\"]"));
+        assert!(prompt.contains("glob/read_file/grep で調査せず"));
+        assert!(!prompt.contains("[効率化ヒント]"));
+    }
+
+    #[test]
+    fn initial_prompt_for_other_explicit_commands_runs_command_first() {
+        let prompt = build_initial_prompt("git status 見て", None);
+
+        assert!(prompt.contains("[明示コマンド依頼]"));
+        assert!(prompt.contains("\"cmd\":[\"git\",\"status\"]"));
+        assert!(prompt.contains("追加調査せず結果を `bot` で報告"));
+    }
+
+    #[test]
+    fn general_coding_task_gets_autonomous_workflow_hint() {
+        let prompt = build_initial_prompt(
+            "コーディングエージェントとして汎用的に動けるように改修したい",
+            None,
+        );
+
+        assert!(task_requires_development_action(
+            "汎用的に動けるように改修したい"
+        ));
+        assert!(prompt.contains("コーディング依頼として、調査→実装→検証"));
+        assert!(prompt.contains("追加質問で止めず"));
+        assert!(prompt.contains("最小で保守的な改善"));
     }
 
     #[test]

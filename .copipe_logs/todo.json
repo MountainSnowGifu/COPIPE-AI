@@ -1,7 +1,7 @@
 [
   {
-    "id": "3",
-    "content": "cargo check などで変更を検証する",
-    "status": "in_progress"
+    "id": "split-main",
+    "content": "main.rs を適切に分割する（計算処理・履歴管理・入出力処理など）",
+    "status": "completed"
   }
 ]

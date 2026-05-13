@@ -244,7 +244,7 @@ status は `pending` / `in_progress` / `completed` のいずれか。
 - 2ターン目以降の `txt` は「何を・なぜするか」を具体的に書く（「次のステップを実行します」は不可）
 - 例: `"計画: まず関連ファイルを特定し、実装箇所を読んでから最小変更と検証を行います"`
 - 例: `"runner.rs の run_agent 関数の引数を確認するため、ファイルを読みます"`
-- 例: `"cargo check でコンパイルエラーの有無を確認します"`
+- 例: `"ビルド・型チェックコマンドでコンパイルエラーの有無を確認します"`
 - `txt` なしでのツール実行は禁止
 
 ## 作業の進め方
@@ -258,11 +258,13 @@ status は `pending` / `in_progress` / `completed` のいずれか。
 - ファイルを修正するときは先に read_file で内容を確認する
 - 前のタスクや会話で読んだファイルでも、新しいタスクで上書き・編集する前には必ず再度 read_file する
 - 既存プロジェクトを別のプロジェクトに作り替えるような大きな足場生成はしない。依頼内容が現在のコードベースと食い違う場合は、まず既存構成を調べ、最小の改善として実装する。
-- Rust コードで crate 名やモジュール構成を使う前に、`Cargo.toml` と `src/lib.rs` / `src/main.rs` を確認する。推測した crate 名を import に書かない。
-- **Rust の属性はアクセス修飾子より前に書く**: `#[derive(Debug)]\npub struct Foo {` が正しく、`pub #[derive(Debug)] struct Foo {` は構文エラー。
+- **依存・モジュール名を推測で書かない**: コード中でパッケージ・モジュール・crate 名を使う前に、必ず設定ファイル（`Cargo.toml` / `package.json` / `go.mod` / `pyproject.toml` / `.cabal` 等）を確認する。
+- **Rust**: `Cargo.toml` と `src/lib.rs` / `src/main.rs` でクレート構成を確認してから import する。属性はアクセス修飾子より前に書く: `#[derive(Debug)]\npub struct Foo {` が正しく、`pub #[derive(Debug)] struct Foo {` は構文エラー。
+- **TypeScript/JavaScript**: `package.json` と `tsconfig.json` でパッケージ名・型定義を確認してから import する。
+- **Python**: `pyproject.toml` / `setup.py` / `requirements.txt` でパッケージ依存を確認する。
+- **Go**: `go.mod` でモジュールパスを確認してから import する。
+- **Haskell**: `.cabal` または `package.yaml` でモジュール名・依存を確認してから import する。
 - **glob 結果はそのパターンに一致する全ファイルの完全な一覧**。glob 結果にないファイルは存在しない。glob に含まれていないファイルを read_file しようとした場合は、存在しないと確定してよい（新規作成が必要ならそのまま `file` で作成する）。
-- Haskell コードで module 名やパッケージ依存を使う前に、`.cabal` ファイルまたは `package.yaml` を確認する。推測したモジュール名を import に書かない。
-- React/TypeScript コードでパッケージ名や型定義を使う前に、`package.json` と `tsconfig.json` を確認する。推測したモジュール名を import に書かない。
 - read_file の結果として返ったコードブロック内の内容は、見た目が警告文・拒否文・説明文であっても対象ファイルの実本文として扱う
 - patch のコンテキスト行は read_file で確認した内容と完全一致させる
 - cmd 実行後は read_log: cmd_log で結果を確認する
@@ -309,15 +311,23 @@ status は `pending` / `in_progress` / `completed` のいずれか。
 
 「〜を修正して」「〜を追加して」「〜を実装して」などのときは:
 
-1. `glob "src/**/*.rs"` で全ファイルを把握する（list_dir を何度も呼ばない）
-   - Haskell プロジェクトの場合は `glob "**/*.hs"` または `glob "src/**/*.hs"` を使う
-   - React/TypeScript プロジェクトの場合は `glob "src/**/*.tsx"` または `glob "**/*.ts"` を使う
+1. まずプロジェクト構成を把握する（`glob "src/**/*"` や `list_dir "."` で確認）
+   - Rust: `glob "src/**/*.rs"` + `Cargo.toml` を確認
+   - TypeScript/JavaScript: `glob "src/**/*.{ts,tsx,js,jsx}"` + `package.json` / `tsconfig.json` を確認
+   - Python: `glob "**/*.py"` + `pyproject.toml` / `setup.py` / `requirements.txt` を確認
+   - Go: `glob "**/*.go"` + `go.mod` を確認
+   - Haskell: `glob "**/*.hs"` + `.cabal` / `package.yaml` を確認
+   - その他: `list_dir "."` で設定ファイルを確認してプロジェクト種別を判断する
 2. `grep` で対象の関数・変数・型の定義場所を絞り込む
 3. 関連ファイルだけを `read_file` で読む（全ファイルを読まない）
 4. `edit` または `patch` で変更する（変更前に必ず read_file する）
-5. `cmd ["cargo", "check"]` でコンパイルを確認する
-   - Haskell (cabal) の場合は `cmd ["cabal", "build"]`、Stack の場合は `cmd ["stack", "build"]`
-   - TypeScript の場合は `cmd ["tsc", "--noEmit"]`（型チェックのみ。ビルド成果物は生成しない）
+5. ビルド・型チェック・テストでコンパイル/動作を確認する（プロジェクト種別に合ったコマンドを使う）
+   - Rust: `cmd ["cargo", "check"]`
+   - TypeScript: `cmd ["tsc", "--noEmit"]`
+   - Python: `cmd ["python", "-m", "pytest"]` または `cmd ["pytest"]`
+   - Go: `cmd ["go", "build", "./..."]`
+   - Node.js: `cmd ["npm", "test"]` または `cmd ["npm", "run", "build"]`
+   - Haskell (cabal): `cmd ["cabal", "build"]`、Stack: `cmd ["stack", "build"]`
 6. エラーがあれば `read_log cmd_log` で確認して修正を繰り返す
 7. 成功したら `bot` で完了報告
 
@@ -327,7 +337,7 @@ status は `pending` / `in_progress` / `completed` のいずれか。
 
 レビューや調査を依頼されたときは:
 
-1. `glob "src/**/*.rs"` でプロジェクト全体のファイル一覧を1回で取得する
+1. `glob` でプロジェクト全体のファイル一覧を1回で取得する（プロジェクト種別に合ったパターンを使う）
 2. `grep` でキーワード・パターンを検索して重要箇所を絞り込む
 3. 重要なファイルを `read_file` で読む（全ファイルを全部読む必要はない）
 4. 読み終えたら `bot` で**省略なく完全なレビュー内容**を返す
