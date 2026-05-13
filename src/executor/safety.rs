@@ -22,8 +22,7 @@ pub const ALLOWED_EXECUTABLES: &[&str] = &[
     // ※ Windows では Git for Windows / busybox 経由でのみ使用可能
     "sort", "uniq", "tr", "cut", "jq",
     // 情報表示（引数ゼロ限定。環境変数表示のみ）
-    "echo", "printf", "date",
-    // Windows: PATH 検索（where.exe）
+    "echo", "printf", "date", // Windows: PATH 検索（where.exe）
     "where",
 ];
 
@@ -51,9 +50,8 @@ const ALLOWED_GIT_SUBCMDS: &[&str] = &[
 const ALLOWED_CARGO_SUBCMDS: &[&str] = &["check", "fmt", "clippy", "doc", "clean"];
 
 /// cargo で明示的に拒否するサブコマンド（任意コード実行の恐れ）
-const BLOCKED_CARGO_SUBCMDS: &[&str] = &[
-    "build", "run", "test", "bench", "fix", "install", "publish",
-];
+const BLOCKED_CARGO_SUBCMDS: &[&str] =
+    &["build", "run", "test", "bench", "fix", "install", "publish"];
 
 /// cabal で許可するサブコマンド
 /// run / test / bench / exec は任意コードを実行するため除外。

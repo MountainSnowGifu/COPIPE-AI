@@ -60,7 +60,7 @@ impl<'a> ToolContext<'a> {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| joined.clone());
             loop {
-                match cur.canonicalize() {
+                match crate::paths::canonicalize_clean(&cur) {
                     Ok(c) => break c,
                     Err(_) => match cur.parent() {
                         Some(p) => cur = p.to_path_buf(),

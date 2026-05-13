@@ -1,7 +1,7 @@
 [
   {
-    "id": "1",
-    "content": "ラジコン.txt の内容から検査ポイントを抽出し、分類し、ポイントごとにファイルを作成する",
-    "status": "completed"
+    "id": "3",
+    "content": "cargo check などで変更を検証する",
+    "status": "in_progress"
   }
 ]

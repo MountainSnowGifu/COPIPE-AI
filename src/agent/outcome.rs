@@ -3,14 +3,13 @@
 /// `determine_outcome` と `apply_stop_hooks` を独立モジュールに分離することで
 /// runner.rs のサイズを縮小し、単体テストを書きやすくする。
 use super::task::{
-    is_deferring_development_message, is_incomplete_handoff_message,
-    is_placeholder_bot_message, is_placeholder_review_message,
-    missing_referenced_project_paths, task_requires_development_action,
-    task_requires_file_update, task_requires_review_output,
+    is_deferring_development_message, is_incomplete_handoff_message, is_placeholder_bot_message,
+    is_placeholder_review_message, missing_referenced_project_paths,
+    task_requires_development_action, task_requires_file_update, task_requires_review_output,
 };
+use crate::executor::ToolResult;
 use crate::executor::errors::is_error_output;
 use crate::executor::tools::todo_write;
-use crate::executor::ToolResult;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -113,7 +112,7 @@ pub(super) fn apply_stop_hooks(
                     Rust プロジェクトの変更後は `cargo check` でコンパイルを確認してから完了報告してください。\n\
                     ```json\n\
                     [{{\"type\":\"txt\",\"content\":\"変更後のコンパイルを確認します\"}},\
-                    {{\"type\":\"cmd\",\"name\":\"コンパイル確認\",\"cmd\":[\"cargo\",\"check\"],\"workdir\":\".\",\"timeout\":60}}]\n\
+                    {{\"type\":\"cmd\",\"name\":\"コンパイル確認\",\"cmd\":[\"cargo\",\"check\"],\"workdir\":\".\",\"timeout\":120}}]\n\
                     ```"
                 ),
             };
@@ -294,6 +293,25 @@ pub(super) fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
                 `bot` で完了を報告してください。\n\
                 ```json\n{{\"type\":\"bot\",\"message\":\"完了しました。\"}}\
 ```"
+            ),
+        };
+    }
+
+    if has_successful_file_update
+        && !is_done
+        && !tool_results.is_empty()
+        && tool_results.iter().any(is_successful_file_update_result)
+        && tool_results.iter().all(|r| !is_error_output(&r.output))
+    {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [File update succeeded]\n\
+                A file write/edit already completed successfully in the previous tool result. \
+                Do not repeat the same write, do not switch to an absolute path, and do not keep probing \
+                unless there is a concrete remaining requirement from the user.\n\
+                If the requested work is complete, return a final `bot` message now.\n\
+                ```json\n{{\"type\":\"bot\",\"message\":\"完了しました。\"}}\n```"
             ),
         };
     }
@@ -522,6 +540,14 @@ fn label_inner(label: &str) -> Option<&str> {
     label
         .find('(')
         .and_then(|start| label.strip_suffix(')').map(|s| &s[start + 1..]))
+}
+
+fn is_successful_file_update_result(r: &ToolResult) -> bool {
+    !is_error_output(&r.output)
+        && (r.label.starts_with("WriteFile(")
+            || r.label.starts_with("Edit(")
+            || r.label.starts_with("MultiEdit(")
+            || r.label.starts_with("Patch("))
 }
 
 pub(super) fn unread_guard_recovery_read_paths(

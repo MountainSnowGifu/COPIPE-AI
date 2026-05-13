@@ -1,4 +1,5 @@
 use super::dom::{ai_message_count, read_nth_ai_text, scroll_to_nth_ai_message};
+use super::page::dismiss_signin_later_safe;
 use std::path::Path;
 use std::time::Duration;
 
@@ -37,9 +38,7 @@ async fn idle_mouse_wiggle(page: &chromiumoxide::Page) {
     };
 
     let scroll_js = if do_scroll {
-        format!(
-            "window.scrollBy({{top: {scroll_dy}, behavior: 'smooth'}});"
-        )
+        format!("window.scrollBy({{top: {scroll_dy}, behavior: 'smooth'}});")
     } else {
         String::new()
     };
@@ -85,6 +84,63 @@ fn write_diag_log(log_dir: Option<&Path>, msg: &str) {
     }
 }
 
+/// URL・タイトル・ページ本文から Cloudflare / ログイン / BOT チャレンジを検出する
+async fn check_page_for_challenge(page: &chromiumoxide::Page) -> Option<String> {
+    let js = r#"
+    (() => {
+        const url   = location.href.toLowerCase();
+        const title = document.title.toLowerCase();
+        const body  = (document.body ? document.body.innerText : '').toLowerCase().slice(0, 600);
+
+        const challengeUrls = [
+            'login.microsoftonline.com',
+            'account.microsoft.com',
+            'challenges.cloudflare.com',
+            '/challenge',
+            'captcha',
+        ];
+        const challengeTitles = [
+            'just a moment',
+            'access denied',
+            'attention required',
+            'security check',
+            '403',
+        ];
+        const challengeBody = [
+            'just a moment',
+            'checking if the site connection is secure',
+            'ddos protection by cloudflare',
+            'ray id:',
+            'enable javascript and cookies to continue',
+            'unusual traffic from your computer',
+        ];
+
+        for (const u of challengeUrls) {
+            if (url.includes(u)) return 'url:' + location.href.slice(0, 120);
+        }
+        for (const t of challengeTitles) {
+            if (title.includes(t)) return 'title:' + document.title.slice(0, 80);
+        }
+        for (const b of challengeBody) {
+            if (body.includes(b)) return 'body:' + b;
+        }
+        return null;
+    })()
+    "#;
+    tokio::time::timeout(Duration::from_secs(5), page.evaluate_expression(js))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|r| r.value().cloned())
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        })
+}
+
 pub(super) async fn detect_copilot_block(page: &chromiumoxide::Page) -> Option<String> {
     let js = r#"
     (() => {
@@ -127,9 +183,10 @@ pub(super) async fn wait_for_ai_message_count(
     log_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let start = tokio::time::Instant::now();
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut dismiss_later_at = tokio::time::Instant::now() + Duration::from_secs(4);
     let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(7);
     let mut tick: u64 = 0;
     loop {
@@ -137,6 +194,15 @@ pub(super) async fn wait_for_ai_message_count(
         tick += 1;
         if ai_message_count(page).await.unwrap_or(0) >= n {
             return Ok(());
+        }
+        if tokio::time::Instant::now() >= dismiss_later_at {
+            dismiss_later_at = tokio::time::Instant::now() + Duration::from_secs(8);
+            if dismiss_signin_later_safe(page).await {
+                write_diag_log(
+                    log_dir,
+                    "[dismiss] clicked signin later while waiting for message",
+                );
+            }
         }
         // 7秒ごとにアイドルマウス動作（bot 検知回避）
         if tokio::time::Instant::now() >= wiggle_at {
@@ -174,20 +240,35 @@ pub(super) async fn wait_for_ai_message_count(
                     });
                 })()
             "#;
-            let input_state = tokio::time::timeout(
-                Duration::from_secs(8),
-                page.evaluate_expression(diag_js),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| "{}".to_string());
+            let input_state =
+                tokio::time::timeout(Duration::from_secs(8), page.evaluate_expression(diag_js))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+                    .unwrap_or_else(|| "{}".to_string());
             write_diag_log(log_dir, &format!("[診断] {input_state}"));
+            if let Some(challenge) = check_page_for_challenge(page).await {
+                write_diag_log(log_dir, &format!("[チャレンジ検出] {challenge}"));
+                eprintln!();
+                eprintln!("⚠ ボット確認画面が検出されました。");
+                eprintln!("  ブラウザで確認を完了してから Enter を押してください...");
+                eprintln!("  （120秒後に自動タイムアウトします）");
+                std::io::stderr().flush().ok();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    tokio::task::spawn_blocking(|| {
+                        let mut buf = String::new();
+                        std::io::stdin().read_line(&mut buf).ok();
+                    }),
+                )
+                .await;
+                deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+                check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
+                continue;
+            }
             if let Some(reason) = detect_copilot_block(page).await {
-                anyhow::bail!(
-                    "応答が停止しました（{reason}）。同じタスクを再入力してください"
-                );
+                anyhow::bail!("応答が停止しました（{reason}）。同じタスクを再入力してください");
             }
         }
         let secs = start.elapsed().as_secs();
@@ -201,13 +282,14 @@ pub(super) async fn wait_for_stable_text(
     page: &chromiumoxide::Page,
     n: usize,
     timeout_secs: u64,
-    _log_dir: Option<&Path>,
+    log_dir: Option<&Path>,
 ) -> anyhow::Result<String> {
     use std::io::Write as _;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let mut last = String::new();
     let mut stable = 0u64;
     let mut check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut dismiss_later_at = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut wiggle_at = tokio::time::Instant::now() + Duration::from_secs(10);
 
     const POLL_MS: u64 = 1_000;
@@ -219,6 +301,15 @@ pub(super) async fn wait_for_stable_text(
         tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
         tick += 1;
         let text = read_nth_ai_text(page, n).await;
+        if tokio::time::Instant::now() >= dismiss_later_at {
+            dismiss_later_at = tokio::time::Instant::now() + Duration::from_secs(10);
+            if dismiss_signin_later_safe(page).await {
+                write_diag_log(
+                    log_dir,
+                    "[dismiss] clicked signin later while waiting for stable text",
+                );
+            }
+        }
 
         if !text.is_empty() && text == last {
             stable += 1;
@@ -262,6 +353,26 @@ pub(super) async fn wait_for_stable_text(
 
         if tokio::time::Instant::now() >= check_block_at {
             check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
+            if let Some(challenge) = check_page_for_challenge(page).await {
+                write_diag_log(log_dir, &format!("[チャレンジ検出] {challenge}"));
+                eprintln!();
+                eprintln!("⚠ ボット確認画面が検出されました。");
+                eprintln!("  ブラウザで確認を完了してから Enter を押してください...");
+                eprintln!("  （120秒後に自動タイムアウトします）");
+                std::io::stderr().flush().ok();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    tokio::task::spawn_blocking(|| {
+                        let mut buf = String::new();
+                        std::io::stdin().read_line(&mut buf).ok();
+                    }),
+                )
+                .await;
+                deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+                check_block_at = tokio::time::Instant::now() + Duration::from_secs(15);
+                stable = 0;
+                continue;
+            }
             if let Some(reason) = detect_copilot_block(page).await {
                 eprintln!();
                 if !last.is_empty() {

@@ -35,8 +35,7 @@ pub(crate) async fn ai_message_count(page: &chromiumoxide::Page) -> anyhow::Resu
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("ai_message_count タイムアウト (8s)"))?
-    ?
+    .map_err(|_| anyhow::anyhow!("ai_message_count タイムアウト (8s)"))??
     .value()
     .and_then(|v| v.as_f64())
     .ok_or_else(|| anyhow::anyhow!("ai-message 数の取得に失敗"))?;
@@ -144,6 +143,23 @@ pub(super) fn looks_like_bot_challenge(text: &str) -> bool {
         "bot detection",
         "アクセスが拒否",
         "セキュリティチェック",
+        // Cloudflare 系
+        "just a moment",
+        "checking if the site connection is secure",
+        "ddos protection",
+        "ray id",
+        "enable javascript and cookies",
+        "needs to review the security",
+        // アクセス制限系
+        "一時的にアクセス",
+        "ご利用の環境を",
+        "アクセス制限",
+        "このサービスはご利用",
+        "環境を確認",
+        "suspicious activity",
+        "too many requests",
+        "rate limit",
+        "レート制限",
     ]
     .iter()
     .any(|needle| lower.contains(needle))

@@ -1,0 +1,17 @@
+﻿[2026-05-13 21:45:12 JST] $ cargo build
+Permission denied: 'cargo build' はビルドスクリプト/proc macro/バイナリ経由で任意コードを実行できるため禁止です
+---
+[2026-05-13 21:45:34 JST] $ cargo check
+exit: 0
+stderr:
+    Checking TEST v0.1.0 (C:\Users\oasis\OneDrive\Desktop\TEST)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+
+---
+[2026-05-13 21:57:21 JST] $ cargo check
+exit: 0
+stderr:
+    Checking TEST v0.1.0 (C:\Users\oasis\OneDrive\Desktop\TEST)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+
+---

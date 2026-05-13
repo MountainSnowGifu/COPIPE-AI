@@ -40,6 +40,9 @@ pub fn safe_append_log(path: &Path, content: &str) {
             .custom_flags(O_NOFOLLOW)
             .open(path)
         {
+            if f.metadata().map(|m| m.len() == 0).unwrap_or(false) {
+                let _ = f.write_all(b"\xEF\xBB\xBF");
+            }
             let _ = f.write_all(content.as_bytes());
         }
     }
@@ -57,6 +60,9 @@ pub fn safe_append_log(path: &Path, content: &str) {
             .append(true)
             .open(path)
         {
+            if f.metadata().map(|m| m.len() == 0).unwrap_or(false) {
+                let _ = f.write_all(b"\xEF\xBB\xBF");
+            }
             let _ = f.write_all(content.as_bytes());
         }
     }

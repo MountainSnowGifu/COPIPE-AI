@@ -25,7 +25,9 @@ fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
     println!("  {BOLD}:y{RESET}       自動確認モード切替     (現在: {BOLD}{y_state}{RESET})");
     println!("  {BOLD}:undo{RESET}    直前のファイル変更を元に戻す");
     println!("  {BOLD}:undo N{RESET}  N番目のチェックポイントを復元  例: :undo 0 (最新) / :undo 2");
-    println!("  {BOLD}:undo list{RESET} チェックポイント一覧を表示  (:undo list で確認後に :undo N で復元)");
+    println!(
+        "  {BOLD}:undo list{RESET} チェックポイント一覧を表示  (:undo list で確認後に :undo N で復元)"
+    );
     println!("  {BOLD}:resume{RESET}  前回の未完了タスクを再開  (MAX_TURNS 到達後に使用)");
     println!("  {BOLD}exit / quit{RESET} 終了  (Ctrl+D でも可)");
     println!();
@@ -36,7 +38,9 @@ fn print_help(verbose: bool, auto_confirm: bool, debug: bool) {
     println!();
     println!("{BOLD}── キー操作 ─────────────────────────────────{RESET}");
     println!("  {BOLD}Enter{RESET}    タスク確認プロンプトで実行");
-    println!("  {BOLD}Ctrl+C{RESET}   実行中: タスクをキャンセル（ブラウザの生成も停止）/ 入力中: 入力をクリア");
+    println!(
+        "  {BOLD}Ctrl+C{RESET}   実行中: タスクをキャンセル（ブラウザの生成も停止）/ 入力中: 入力をクリア"
+    );
     println!("  {BOLD}Ctrl+D{RESET}   終了");
     println!();
     println!("{BOLD}── 動作要件 ─────────────────────────────────{RESET}");

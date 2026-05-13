@@ -83,15 +83,16 @@ pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
         return ToolResult::new("TodoWrite", "ERROR: todo.json への書き込みに失敗しました。");
     }
 
-    // フォーマットして表示（ターミナル + ツール結果）
-    let formatted = format_todos(todos);
+    // フォーマットして表示（ターミナル向けはANSI有効版、AI向けはプレーン版）
+    let formatted_term = format_todos(todos);
+    let formatted_plain = format_todos_plain(todos);
     let guidance = todo_guidance(todos);
-    println!("\n{formatted}");
+    println!("\n{formatted_term}");
 
     let output = if guidance.is_empty() {
-        format!("OK\n\n{formatted}")
+        format!("OK\n\n{formatted_plain}")
     } else {
-        format!("OK\n\n{formatted}\n\n{guidance}")
+        format!("OK\n\n{formatted_plain}\n\n{guidance}")
     };
     ToolResult::new("TodoWrite", output)
 }
@@ -99,19 +100,25 @@ pub fn handle(ctx: &ToolContext<'_>, todos: &[TodoItem]) -> ToolResult {
 /// todo リストをターミナル向けにフォーマットする
 pub fn format_todos(todos: &[TodoItem]) -> String {
     let mut lines = vec!["── タスクリスト ──────────────────────────────".to_string()];
+    let reset = format!("{}", crate::color::RESET);
+    let use_color = !reset.is_empty();
     for item in todos {
         let icon = match item.status {
             TodoStatus::Completed => "✓",
             TodoStatus::InProgress => "●",
             TodoStatus::Pending => "○",
         };
-        let style = match item.status {
-            TodoStatus::Completed => "\x1b[2m",     // dim
-            TodoStatus::InProgress => "\x1b[1;36m", // cyan bold
-            TodoStatus::Pending => "",
+        let (style, reset_str) = if use_color {
+            match item.status {
+                TodoStatus::Completed => ("\x1b[2m", reset.as_str()),
+                TodoStatus::InProgress => ("\x1b[1;36m", reset.as_str()),
+                TodoStatus::Pending => ("", ""),
+            }
+        } else {
+            ("", "")
         };
         lines.push(format!(
-            "  {style}{icon} [{}] {}\x1b[0m",
+            "  {style}{icon} [{}] {}{reset_str}",
             item.id, item.content
         ));
     }

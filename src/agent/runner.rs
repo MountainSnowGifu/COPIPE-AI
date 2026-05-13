@@ -1,7 +1,9 @@
 use super::context::{build_context_header, summarize_for_display};
 use super::debug_log::DebugLogger;
 use super::log::{write_ai_log, write_browser_log};
-use super::outcome::{TurnOutcome, TurnState, apply_stop_hooks, determine_outcome, turn_outcome_name};
+use super::outcome::{
+    TurnOutcome, TurnState, apply_stop_hooks, determine_outcome, turn_outcome_name,
+};
 use super::parser::{SCHEMA_HINT, parse_blocks};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{CompletionSummary, SessionData, SessionStore};
@@ -264,6 +266,7 @@ fn should_require_todo_before_development_action(
     let has_todo_write = commands
         .iter()
         .any(|c| matches!(c, AiCommand::TodoWrite { .. }));
+    // Cmd（cargo check 等の検証コマンド）はTODO不要。ファイル変更操作のみ対象とする。
     let has_development_action = commands.iter().any(|c| {
         matches!(
             c,
@@ -273,7 +276,6 @@ fn should_require_todo_before_development_action(
                 | AiCommand::Patch { .. }
                 | AiCommand::DeleteFile { .. }
                 | AiCommand::Mkdir { .. }
-                | AiCommand::Cmd { .. }
         )
     });
 
@@ -428,7 +430,9 @@ async fn get_commands(
         }
         Err(_) => {
             write_browser_log(root, "send_raw timeout after 210s", session).await;
-            anyhow::bail!("Copilot との通信がタイムアウトしました（450秒）。同じタスクを再入力してください");
+            anyhow::bail!(
+                "Copilot との通信がタイムアウトしました（450秒）。同じタスクを再入力してください"
+            );
         }
     }
 
@@ -519,6 +523,9 @@ fn substantive_plain_text_response(text: &str) -> Option<String> {
     if trimmed.chars().count() < 160 {
         return None;
     }
+    if looks_like_interstitial_text(trimmed) {
+        return None;
+    }
     let lower = trimmed.to_ascii_lowercase();
     let looks_like_schema_nudge = lower.contains("json")
         && (trimmed.contains("\"type\"")
@@ -529,6 +536,31 @@ fn substantive_plain_text_response(text: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+fn looks_like_interstitial_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let has_signin_provider = text.contains("Microsoft で続行")
+        || text.contains("Google で続行")
+        || text.contains("Apple で続行")
+        || lower.contains("continue with microsoft")
+        || lower.contains("continue with google")
+        || lower.contains("continue with apple");
+    let has_later_action = text.contains("後で")
+        || lower.contains("not now")
+        || lower.contains("skip for now")
+        || lower.contains("later");
+    let looks_like_auth = lower.contains("sign in")
+        || lower.contains("signin")
+        || text.contains("サインイン")
+        || text.contains("ログイン")
+        || lower.contains("verify you are human")
+        || lower.contains("captcha")
+        || lower.contains("unusual activity")
+        || lower.contains("bot detection")
+        || lower.contains("automated");
+
+    looks_like_auth || has_signin_provider || has_later_action
 }
 
 // ─── メインエージェントループ ─────────────────────────────────────────────────
@@ -878,7 +910,7 @@ pub async fn run_agent(
             && tool_results.is_empty()
             && commands.iter().all(|c| matches!(c, AiCommand::Txt { .. }));
 
-        if has_executable_tool(&commands) && !has_txt_command(&commands) {
+        if done_log.is_empty() && has_executable_tool(&commands) && !has_txt_command(&commands) {
             counters.consecutive_txt += 1;
             let ctx = build_context_header(user_task, &read_files, root, &done_log);
             prompt = format!(
@@ -1234,8 +1266,8 @@ fn print_summary(done_log: &[String], reached_max: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::outcome::recovery_hint_for_tool_results;
+    use super::*;
     // task.rs に移動したタスク分類関数をテストスコープへ
     use super::super::task::*;
 
@@ -1887,5 +1919,21 @@ mod tests {
             matches!(outcome, TurnOutcome::Continue { .. }),
             "2件では nudge しないはず: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn plain_text_signin_later_prompt_is_not_treated_as_bot() {
+        let text = "サインインするとさらに便利に利用できます。Microsoft で続行、Google で続行、Apple で続行、または後で選択できます。"
+            .repeat(4);
+
+        assert!(substantive_plain_text_response(&text).is_none());
+    }
+
+    #[test]
+    fn substantive_plain_text_can_still_be_wrapped_as_bot() {
+        let text = "調査結果として、対象ファイルには重複した責務があり、入力検証と出力整形が同じ関数に混在しています。まず検証処理を小さな関数に分離し、呼び出し側では Result を扱うだけにすると見通しがよくなります。"
+            .repeat(2);
+
+        assert!(substantive_plain_text_response(&text).is_some());
     }
 }

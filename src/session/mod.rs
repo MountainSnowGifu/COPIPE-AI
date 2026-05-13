@@ -1,4 +1,4 @@
-mod browser;
+﻿mod browser;
 mod dom;
 mod input;
 mod page;
@@ -18,11 +18,10 @@ pub(crate) use dom::{
     ai_message_count, get_codeblocks_from_dom, page_diagnostic, read_nth_ai_text,
 };
 
-// ─── ユーティリティ ───────────────────────────────────────────────────────────
+// 隨渉隨渉隨渉 郢晢ｽｦ郢晢ｽｼ郢昴・縺・ｹ晢ｽｪ郢昴・縺・隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉
 
-/// base_ms ± spread_ms/2 のランダムな待機時間を返す
+/// base_ms ・ゑｽｱ spread_ms/2 邵ｺ・ｮ郢晢ｽｩ郢晢ｽｳ郢敖郢晢｣ｰ邵ｺ・ｪ陟輔・・ｩ貊灘・鬮｢阮呻ｽ帝恆譁絶・
 fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
-    // subsec_nanos は同ミリ秒内で同値になる問題があるため as_nanos() 全体を使う
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -30,7 +29,7 @@ fn jitter(base_ms: u64, spread_ms: u64) -> Duration {
     Duration::from_millis(base_ms + seed % spread_ms.max(1))
 }
 
-// ─── プロンプト分割 ───────────────────────────────────────────────────────────
+// 隨渉隨渉隨渉 郢晏干ﾎ溽ｹ晢ｽｳ郢晏干繝ｨ陋ｻ繝ｻ迚｡ 隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉
 
 const PROMPT_CHUNK_SIZE: usize = 7_000;
 
@@ -61,7 +60,63 @@ fn split_prompt(text: &str) -> Vec<String> {
     chunks
 }
 
-// ─── CopilotSession ──────────────────────────────────────────────────────────
+async fn input_has_text(page: &chromiumoxide::Page) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        page.evaluate_expression(include_str!("js/input_has_text.js")),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|r| r.value().and_then(|v| v.as_bool()))
+    .unwrap_or(false)
+}
+
+async fn send_button(page: &chromiumoxide::Page) -> Option<String> {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        page.evaluate_expression(include_str!("js/send_button.js")),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
+}
+
+async fn send_enter(page: &chromiumoxide::Page) -> anyhow::Result<String> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        page.evaluate_expression(include_str!("js/send_enter.js")),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("send_enter timeout"))??;
+
+    Ok(result
+        .value()
+        .and_then(|v| v.as_str())
+        .unwrap_or("enter")
+        .to_string())
+}
+
+async fn wait_for_send_acceptance(
+    page: &chromiumoxide::Page,
+    target: usize,
+    timeout: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if ai_message_count(page).await.unwrap_or(0) >= target {
+            return true;
+        }
+        if !input_has_text(page).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
+    false
+}
+
+// 隨渉隨渉隨渉 CopilotSession 隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉隨渉
 
 pub struct CopilotSession {
     pub(crate) page: chromiumoxide::Page,
@@ -80,7 +135,7 @@ impl Drop for CopilotSession {
 
 impl CopilotSession {
     pub async fn start() -> anyhow::Result<Self> {
-        println!("[1/3] ブラウザを起動中...");
+        println!("[1/3] Edge ブラウザを起動中...");
         let port = free_port()?;
         let mut edge = launch_edge(port)?;
         let result = Self::init(port, &mut edge).await;
@@ -109,12 +164,12 @@ impl CopilotSession {
         let handle = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
                 if let Err(_) = h {
-                    // CDP切断エラーは終了時の正常シーケンスでも発生するため黙殺
+                    // CDP陋ｻ繝ｻ螯咏ｹｧ・ｨ郢晢ｽｩ郢晢ｽｼ邵ｺ・ｯ驍ｨ繧・ｽｺ繝ｻ蜃ｾ邵ｺ・ｮ雎・ｽ｣陝ｶ・ｸ郢ｧ・ｷ郢晢ｽｼ郢ｧ・ｱ郢晢ｽｳ郢ｧ・ｹ邵ｺ・ｧ郢ｧ繧牙験騾墓ｺ倪・郢ｧ荵昶螺郢ｧ繝ｻ・ｻ蜻趣ｽｮ・ｺ
                     break;
                 }
             }
         });
-        println!("[3/3] セッションを初期化中...");
+        println!("[3/3] ページを準備中...");
         match prepare_copilot_page(&browser).await {
             Ok(page) => Ok((page, handle)),
             Err(e) => {
@@ -133,12 +188,12 @@ impl CopilotSession {
             let msg = if total == 1 {
                 chunk
             } else if part < total {
-                format!("（{part}/{total}）続きがあります。JSON応答はまだ不要です。\n{chunk}")
+                format!("({part}/{total}) More chunks follow. Do not answer yet.`n{chunk}")
             } else {
-                format!("（{part}/{total}）全データ送信完了。以降の処理を続けてください。\n{chunk}")
+                format!("({part}/{total}) All chunks sent. Continue processing.`n{chunk}")
             };
             if total > 1 {
-                eprintln!("送信 {part}/{total} ({}文字)", msg.len());
+                eprintln!("send {part}/{total} ({} chars)", msg.len());
             }
             self.send_raw_single(&msg).await?;
         }
@@ -152,15 +207,14 @@ impl CopilotSession {
         dismiss_signin_later_safe(page).await;
         wait_for_input(page, 10).await?;
 
-        // 入力前にページを少しスクロール（直前の応答を読み終えた自然な動作）
+        // Slightly scroll before input so the page is in a natural state.
         {
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            // 50%の確率でスクロール（毎回やると不自然）
             if seed % 2 == 0 {
-                let dy = 40 + (seed % 80); // 40〜119px 下にスクロール
+                let dy = 40 + (seed % 80); // 40邵ｲ繝ｻ19px 闕ｳ荵昶・郢ｧ・ｹ郢ｧ・ｯ郢晢ｽｭ郢晢ｽｼ郢晢ｽｫ
                 let js = format!("window.scrollBy({{top: {dy}, behavior: 'smooth'}});");
                 tokio::time::timeout(Duration::from_secs(3), page.evaluate_expression(&js))
                     .await
@@ -172,94 +226,116 @@ impl CopilotSession {
         scroll_to_selector(page, INPUT_SELECTOR).await;
         tokio::time::sleep(jitter(700, 500)).await;
 
-        // Bézier 曲線軌跡でマウスを入力欄に移動してクリック
         tokio::time::timeout(
             Duration::from_secs(10),
             page.evaluate_expression(include_str!("js/move_and_click.js")),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("move_and_click タイムアウト"))?
-        ?;
+        .map_err(|_| anyhow::anyhow!("move_and_click timeout"))??;
         tokio::time::sleep(jitter(600, 400)).await;
 
-        // テキスト入力: React setter を主軸にしつつ追加イベントで React state を確実に更新
+        // Show progress while inserting text.
         {
             use std::io::Write as _;
-            eprint!("\r  Copilot へ入力中...          ");
+            eprint!("\r  Copilot へ送信中...                        ");
             std::io::stderr().flush().ok();
         }
-        let js_str = serde_json::to_string(prompt)?;
+        // Focus the input before CDP InsertText.
         tokio::time::timeout(
-            Duration::from_secs(15),
-            page.evaluate_expression(&format!(
-                "({})({})",
-                include_str!("js/react_set_value.js"),
-                js_str
-            )),
+            Duration::from_secs(5),
+            page.evaluate_expression(
+                r#"(function() {
+                    const el = window.__copipeFindInput
+                        ? window.__copipeFindInput()
+                        : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
+                    if (el) { el.focus(); return true; }
+                    return false;
+                })()"#,
+            ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("react_set_value タイムアウト"))?
-        ?;
-        tokio::time::sleep(jitter(900, 700)).await;
+        .ok();
+        tokio::time::sleep(jitter(150, 100)).await;
 
-        // 送信: 送信ボタンクリックを優先し、見つからない場合は Enter キーにフォールバック
-        let target = baseline + 1;
-        let btn_result = tokio::time::timeout(
-            Duration::from_secs(10),
-            page.evaluate_expression(include_str!("js/send_button.js")),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())));
-
-        let send_log_msg = if let Some(ref detail) = btn_result {
-            // ボタンクリック成功
-            tokio::time::sleep(jitter(400, 250)).await;
-            format!("[送信:ボタン] {detail}\n---")
-        } else {
-            // ボタンが見つからない場合は Enter キーで試みる
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                page.evaluate_expression(include_str!("js/send_enter.js")),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("send_enter タイムアウト"))?
-            ?;
-            tokio::time::sleep(jitter(400, 250)).await;
-
-            // 入力欄にテキストが残っていれば最終手段としてボタン再試行
-            let still_text = tokio::time::timeout(
-                Duration::from_secs(8),
-                page.evaluate_expression(
-                    r#"(function() {
-                        const inp = window.__copipeFindInput ? window.__copipeFindInput() : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
-                        if (!inp) return false;
-                        if ('value' in inp) return (inp.value || '').length > 0;
-                        return (inp.innerText || inp.textContent || '').length > 0;
-                    })()"#,
-                ),
+        // 遶ｭ・ｰ CDP Input.insertText 遯ｶ繝ｻOS 郢晢ｽｬ郢晏生ﾎ晉ｸｺ・ｮ郢ｧ・ｭ郢晢ｽｼ陷茨ｽ･陷牙ｸ吮・陷ｷ蠕個ｧ郢昜ｻ｣縺帷ｹｧ蟶敖螢ｹ・狗ｸｺ貅假ｽ∬ｭ崢郢ｧ繧翫・霎滂ｽｶ
+        {
+            use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
+            let cdp_ok = tokio::time::timeout(
+                Duration::from_secs(30),
+                page.execute(InsertTextParams::new(prompt)),
             )
             .await
             .ok()
             .and_then(|r| r.ok())
-            .and_then(|r| r.value().and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-            if still_text && ai_message_count(page).await.unwrap_or(0) < target {
+            .is_some();
+
+            if cdp_ok {
+                // Notify React-style listeners after CDP text insertion.
                 tokio::time::timeout(
-                    Duration::from_secs(10),
-                    page.evaluate_expression(include_str!("js/send_button.js")),
+                    Duration::from_secs(5),
+                    page.evaluate_expression(
+                        r#"(function() {
+                            const el = window.__copipeFindInput
+                                ? window.__copipeFindInput()
+                                : document.querySelector('#userInput, textarea, [contenteditable="true"][role="textbox"], [role="textbox"][contenteditable="true"]');
+                            if (!el) return;
+                            el.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                        })()"#,
+                    ),
                 )
                 .await
                 .ok();
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                "[送信フォールバック:ボタン再試行]\n---".to_string()
             } else {
-                "[送信:Enter]\n---".to_string()
+                // Fallback through React's native value setter.
+                let js_str = serde_json::to_string(prompt)?;
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    page.evaluate_expression(&format!(
+                        "({})({})",
+                        include_str!("js/react_set_value.js"),
+                        js_str
+                    )),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("react_set_value timeout"))??;
             }
+        }
+        tokio::time::sleep(jitter(900, 700)).await;
+
+        // 鬨ｾ竏ｽ・ｿ・｡: 鬨ｾ竏ｽ・ｿ・｡郢晄㈱縺｡郢晢ｽｳ郢ｧ・ｯ郢晢ｽｪ郢昴・縺醍ｹｧ雋樞煤陷亥現・邵ｲ竏ｬ・ｦ荵昶命邵ｺ荵晢ｽ臥ｸｺ・ｪ邵ｺ繝ｻ・ｰ・ｴ陷ｷ蛹ｻ繝ｻ Enter 郢ｧ・ｭ郢晢ｽｼ邵ｺ・ｫ郢晁ｼ斐°郢晢ｽｼ郢晢ｽｫ郢晁・繝｣郢ｧ・ｯ
+        let target = baseline + 1;
+        let mut send_attempts = Vec::new();
+        let mut accepted = false;
+
+        for attempt in 1..=4 {
+            let detail = if attempt == 2 {
+                format!("enter:{}", send_enter(page).await?)
+            } else if let Some(detail) = send_button(page).await {
+                format!("button:{detail}")
+            } else {
+                format!("enter:{}", send_enter(page).await?)
+            };
+            send_attempts.push(format!("#{attempt} {detail}"));
+
+            tokio::time::sleep(jitter(650, 350)).await;
+            if wait_for_send_acceptance(page, target, Duration::from_secs(4)).await {
+                accepted = true;
+                break;
+            }
+
+            dismiss_signin_later_safe(page).await;
+            scroll_to_selector(page, INPUT_SELECTOR).await;
+            tokio::time::sleep(jitter(350, 250)).await;
+        }
+
+        let send_log_msg = if accepted {
+            format!("[send:accepted] {}\n---", send_attempts.join(" -> "))
+        } else {
+            format!("[send:unconfirmed] {}\n---", send_attempts.join(" -> "))
         };
 
-        // 送信方法をログファイルに記録（端末には出さない）
+        // Keep the send method in the browser log.
         if let Some(ref ld) = self.log_dir {
             let log_path = ld.join("browser_log");
             if !log_path
@@ -281,28 +357,28 @@ impl CopilotSession {
         }
 
         let log_dir_ref = self.log_dir.as_deref();
+        dismiss_signin_later_safe(page).await;
         wait_for_ai_message_count(page, target, 120, log_dir_ref).await?;
+        dismiss_signin_later_safe(page).await;
         wait_for_stable_text(page, target, 180, log_dir_ref).await?;
+        dismiss_signin_later_safe(page).await;
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
             scroll_to_nth_ai_message(page, target),
         )
         .await;
-        // 応答受信後の「読み返し」自然遅延（bot 検知回避）
         tokio::time::sleep(jitter(1_500, 2_000)).await;
         Ok(())
     }
 
-    /// Copilot の生成を停止する（Ctrl+C キャンセル時に呼ぶ）。
-    /// 停止ボタンが見つからない場合は Escape キーを送信してフォールバック。
+    /// Stop Copilot generation when Ctrl+C is pressed.
     pub async fn stop_generation(&self) {
         let result = self
             .page
             .evaluate_expression(
                 r#"
             (function() {
-                // 生成停止ボタンを探してクリック
-                const selectors = [
+                // 騾墓ｻ薙・陋帶㊧・ｭ・｢郢晄㈱縺｡郢晢ｽｳ郢ｧ蜻育粟邵ｺ蜉ｱ窶ｻ郢ｧ・ｯ郢晢ｽｪ郢昴・縺・                const selectors = [
                     '[aria-label*="Stop"]', '[aria-label*="停止"]',
                     '[data-testid*="stop"]', '[data-testid*="Stop"]',
                     'button[title*="Stop"]', 'button[title*="停止"]',
@@ -314,7 +390,7 @@ impl CopilotSession {
                         return 'stopped:' + sel;
                     }
                 }
-                // フォールバック: Escape キー
+                // 郢晁ｼ斐°郢晢ｽｼ郢晢ｽｫ郢晁・繝｣郢ｧ・ｯ: Escape 郢ｧ・ｭ郢晢ｽｼ
                 document.dispatchEvent(new KeyboardEvent('keydown', {
                     key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
                 }));

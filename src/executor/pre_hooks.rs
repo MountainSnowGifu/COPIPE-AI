@@ -98,7 +98,11 @@ fn hook_log_action(tool_name: &str, cmd: &AiCommand, _root: &std::path::Path) ->
 }
 
 /// 2MB を超えるファイルの読み込みをブロック
-fn hook_guard_large_file(tool_name: &str, cmd: &AiCommand, root: &std::path::Path) -> PreHookOutcome {
+fn hook_guard_large_file(
+    tool_name: &str,
+    cmd: &AiCommand,
+    root: &std::path::Path,
+) -> PreHookOutcome {
     const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
     if tool_name != "read_file" {
         return PreHookOutcome::Continue;
@@ -124,7 +128,11 @@ fn hook_guard_large_file(tool_name: &str, cmd: &AiCommand, root: &std::path::Pat
 }
 
 /// ファイル削除・上書きを cmd_log に記録する（監査ログ）
-fn hook_notify_destructive(_tool_name: &str, cmd: &AiCommand, _root: &std::path::Path) -> PreHookOutcome {
+fn hook_notify_destructive(
+    _tool_name: &str,
+    cmd: &AiCommand,
+    _root: &std::path::Path,
+) -> PreHookOutcome {
     let action = match cmd {
         AiCommand::DeleteFile { path } => Some(format!("DELETE {path}")),
         AiCommand::File { path, .. } => Some(format!("WRITE  {path}")),
@@ -161,7 +169,10 @@ mod tests {
             offset_lines: 0,
         };
         let root = std::path::Path::new(".");
-        assert!(matches!(run("read_file", &cmd, root), PreHookOutcome::Continue));
+        assert!(matches!(
+            run("read_file", &cmd, root),
+            PreHookOutcome::Continue
+        ));
     }
 
     #[test]
@@ -170,7 +181,10 @@ mod tests {
             path: "src".to_string(),
         };
         let root = std::path::Path::new(".");
-        assert!(matches!(run("list_dir", &cmd, root), PreHookOutcome::Continue));
+        assert!(matches!(
+            run("list_dir", &cmd, root),
+            PreHookOutcome::Continue
+        ));
     }
 
     #[test]
@@ -180,6 +194,9 @@ mod tests {
             path: "old.rs".to_string(),
         };
         let root = std::path::Path::new(".");
-        assert!(matches!(run("delete_file", &cmd, root), PreHookOutcome::Continue));
+        assert!(matches!(
+            run("delete_file", &cmd, root),
+            PreHookOutcome::Continue
+        ));
     }
 }

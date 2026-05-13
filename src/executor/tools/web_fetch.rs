@@ -123,17 +123,17 @@ pub async fn handle(url: &str, _selector: &Option<String>) -> ToolResult {
             // 相対 URL を絶対 URL に解決
             let next_url = match reqwest::Url::parse(&location) {
                 Ok(u) => u.to_string(),
-                Err(_) => match reqwest::Url::parse(&current_url)
-                    .and_then(|base| base.join(&location))
-                {
-                    Ok(u) => u.to_string(),
-                    Err(e) => {
-                        return ToolResult::new(
-                            label,
-                            format!("ERROR: リダイレクト URL の解決に失敗: {e}"),
-                        );
+                Err(_) => {
+                    match reqwest::Url::parse(&current_url).and_then(|base| base.join(&location)) {
+                        Ok(u) => u.to_string(),
+                        Err(e) => {
+                            return ToolResult::new(
+                                label,
+                                format!("ERROR: リダイレクト URL の解決に失敗: {e}"),
+                            );
+                        }
                     }
-                },
+                }
             };
             // リダイレクト先にも SSRF チェック（ホスト名の DNS 解決を含む）
             if let Err(e) = check_ssrf(&next_url).await {

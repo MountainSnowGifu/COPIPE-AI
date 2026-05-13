@@ -23,7 +23,9 @@ pub async fn handle(question: &str, hint: &Option<String>) -> ToolResult {
     const TIMEOUT_SECS: u64 = 60;
     println!(
         "{}  ⏱ {}秒以内に回答してください（超過時はタスクを自動継続）{}",
-        crate::color::DIM, TIMEOUT_SECS, crate::color::RESET
+        crate::color::DIM,
+        TIMEOUT_SECS,
+        crate::color::RESET
     );
     print!("{}回答 > {}", crate::color::BOLD, crate::color::RESET);
     std::io::stdout().flush().ok();

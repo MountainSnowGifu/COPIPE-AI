@@ -229,12 +229,8 @@ fn normalize_command_value(value: Value) -> Value {
                         }
                     } else {
                         // トップレベルに before / after / old / new がある場合
-                        let before = map
-                            .remove("before")
-                            .or_else(|| map.remove("old"));
-                        let after = map
-                            .remove("after")
-                            .or_else(|| map.remove("new"));
+                        let before = map.remove("before").or_else(|| map.remove("old"));
+                        let after = map.remove("after").or_else(|| map.remove("new"));
                         if let (Some(b), Some(a)) = (before, after) {
                             map.insert("old_string".to_string(), b);
                             map.insert("new_string".to_string(), a);

@@ -1,5 +1,5 @@
-use crate::executor::context::ToolContext;
 use crate::executor::ToolResult;
+use crate::executor::context::ToolContext;
 
 pub fn handle(ctx: &mut ToolContext<'_>, path: &str, offset_lines: usize) -> ToolResult {
     if ctx.turn_read_chars >= ctx.max_turn_read {
