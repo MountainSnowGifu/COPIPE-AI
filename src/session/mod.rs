@@ -188,9 +188,9 @@ impl CopilotSession {
             let msg = if total == 1 {
                 chunk
             } else if part < total {
-                format!("({part}/{total}) More chunks follow. Do not answer yet.`n{chunk}")
+                format!("({part}/{total}) More chunks follow. Do not answer yet.\n{chunk}")
             } else {
-                format!("({part}/{total}) All chunks sent. Continue processing.`n{chunk}")
+                format!("({part}/{total}) All chunks sent. Continue processing.\n{chunk}")
             };
             if total > 1 {
                 eprintln!("send {part}/{total} ({} chars)", msg.len());
@@ -418,5 +418,12 @@ mod tests {
         assert!(!wrapped.contains("});)("));
         assert!(wrapped.starts_with("((function"));
         assert!(wrapped.contains(")(\"hello; world\")"));
+    }
+
+    #[test]
+    fn send_button_script_does_not_double_click() {
+        let script = include_str!("js/send_button.js");
+
+        assert!(!script.contains("target.click()"));
     }
 }

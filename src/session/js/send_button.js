@@ -39,7 +39,6 @@
     for (const ev of ["mouseover", "mouseenter", "mousedown", "mouseup", "click"]) {
       target.dispatchEvent(new MouseEvent(ev, mouse));
     }
-    target.click();
     return target;
   };
 
