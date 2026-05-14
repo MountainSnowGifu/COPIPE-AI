@@ -1,4 +1,4 @@
-﻿mod browser;
+mod browser;
 mod dom;
 mod input;
 mod page;
@@ -425,5 +425,19 @@ mod tests {
         let script = include_str!("js/send_button.js");
 
         assert!(!script.contains("target.click()"));
+    }
+
+    #[test]
+    fn dismiss_signin_later_script_matches_current_japanese_modal() {
+        let script = include_str!("js/dismiss_signin_later.js");
+
+        assert!(script.contains("\\u5f8c\\u3067"));
+        assert!(script.contains("\\u30b5\\u30a4\\u30f3\\u30a4\\u30f3"));
+        assert!(script.contains(
+            "\\u5b8c\\u5168\\u306a\\u30a8\\u30af\\u30b9\\u30da\\u30ea\\u30a8\\u30f3\\u30b9"
+        ));
+        assert!(script.contains("target.click()"));
+        assert!(script.contains("x: tx"));
+        assert!(script.contains("y: ty"));
     }
 }

@@ -7,6 +7,7 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
     SetUserAgentOverrideParams, UserAgentBrandVersion, UserAgentMetadata,
 };
 use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+use chromiumoxide::layout::Point;
 use std::time::Duration;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0";
@@ -497,59 +498,39 @@ pub(super) async fn dismiss_signin_later(page: &chromiumoxide::Page) -> bool {
 }
 
 pub(super) async fn dismiss_signin_later_safe(page: &chromiumoxide::Page) -> bool {
-    let visible = tokio::time::timeout(
-        Duration::from_secs(8),
-        page.evaluate_expression(
-            r#"
-            (() => {
-                const labels = ["\u5f8c\u3067", "Later", "Not now", "Skip for now"];
-                const providerLabels = [
-                    "Microsoft \u3067\u7d9a\u884c",
-                    "Apple \u3067\u7d9a\u884c",
-                    "Google \u3067\u7d9a\u884c",
-                ];
-                const visible = (el) => {
-                    if (!el) return false;
-                    const style = window.getComputedStyle(el);
-                    if (style.visibility === "hidden" || style.display === "none") return false;
-                    const r = el.getBoundingClientRect();
-                    return r.width > 4 && r.height > 4;
-                };
-                const textOf = (el) => (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-                return [...document.querySelectorAll('button, [role="button"], a, [tabindex]:not([tabindex="-1"]), div, span')]
-                    .some((el) => visible(el) && labels.some((label) => {
-                        const text = textOf(el);
-                        const isInteractive = el.matches('button, [role="button"], a, [tabindex]:not([tabindex="-1"])');
-                        if (!(text === label || (isInteractive && text.includes(label)))) return false;
-                        if (!isInteractive && text.length > 40) return false;
-                        const modalText = textOf(el.closest('[role="dialog"], [aria-modal="true"], main, body'));
-                        return providerLabels.some((providerLabel) => modalText.includes(providerLabel)) ||
-                            modalText.toLowerCase().includes("sign in");
-                    }));
-            })()
-            "#,
-        ),
-    )
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .and_then(|r| r.value().and_then(|v| v.as_bool()))
-    .unwrap_or(false);
-
-    if !visible {
-        return false;
-    }
-
-    tokio::time::sleep(jitter(650, 850)).await;
-    tokio::time::timeout(
+    tokio::time::sleep(jitter(120, 220)).await;
+    let result = tokio::time::timeout(
         Duration::from_secs(8),
         page.evaluate_expression(include_str!("js/dismiss_signin_later.js")),
     )
     .await
     .ok()
     .and_then(|r| r.ok())
-    .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-    .is_some()
+    .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s.to_string())));
+
+    let Some(result) = result else {
+        return false;
+    };
+
+    let parsed = serde_json::from_str::<serde_json::Value>(&result).ok();
+    let x = parsed
+        .as_ref()
+        .and_then(|v| v.get("x"))
+        .and_then(|v| v.as_f64());
+    let y = parsed
+        .as_ref()
+        .and_then(|v| v.get("y"))
+        .and_then(|v| v.as_f64());
+
+    if let (Some(x), Some(y)) = (x, y) {
+        tokio::time::sleep(jitter(80, 120)).await;
+        tokio::time::timeout(Duration::from_secs(5), page.click(Point::new(x, y)))
+            .await
+            .ok()
+            .and_then(|r| r.ok());
+    }
+
+    true
 }
 
 pub(super) async fn prepare_copilot_page(browser: &Browser) -> anyhow::Result<chromiumoxide::Page> {

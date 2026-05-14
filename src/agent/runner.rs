@@ -16,6 +16,7 @@ use super::task::{
 };
 use crate::color::{BOLD, CYAN_BOLD, DIM, GREEN, RED, RED_BOLD, RESET, YELLOW};
 use crate::command::AiCommand;
+use crate::command::TodoItem;
 use crate::command::TodoStatus;
 use crate::executor::errors::is_error_output;
 use crate::executor::pre_hooks::is_destructive_tool;
@@ -281,6 +282,42 @@ fn should_require_todo_before_development_action(
     });
 
     has_development_action && !has_todo_write
+}
+
+fn summarize_first_development_action(commands: &[AiCommand]) -> String {
+    commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            AiCommand::File { path, .. } => Some(format!("{path} を作成または更新する")),
+            AiCommand::Edit { path, .. } => Some(format!("{path} を編集する")),
+            AiCommand::MultiEdit { path, .. } => Some(format!("{path} を複数箇所編集する")),
+            AiCommand::Patch { path, .. } => Some(format!("{path} にパッチを適用する")),
+            AiCommand::DeleteFile { path } => Some(format!("{path} を削除する")),
+            AiCommand::Mkdir { path } => Some(format!("{path} を作成する")),
+            _ => None,
+        })
+        .unwrap_or_else(|| "必要な開発作業を進める".to_string())
+}
+
+fn insert_autonomous_todo_for_development_action(commands: &mut Vec<AiCommand>) -> String {
+    let summary = summarize_first_development_action(commands);
+    let insert_at = commands
+        .iter()
+        .position(|c| !matches!(c, AiCommand::Txt { .. }))
+        .unwrap_or(commands.len());
+
+    commands.insert(
+        insert_at,
+        AiCommand::TodoWrite {
+            todos: vec![TodoItem {
+                id: "auto-1".to_string(),
+                content: format!("自律実行: {summary}"),
+                status: TodoStatus::Completed,
+            }],
+        },
+    );
+
+    summary
 }
 
 fn has_executable_tool(commands: &[AiCommand]) -> bool {
@@ -767,7 +804,7 @@ pub async fn run_agent(
             ),
         );
 
-        let (commands, parse_errors) = get_commands(session, root, &prompt, verbose).await?;
+        let (mut commands, parse_errors) = get_commands(session, root, &prompt, verbose).await?;
         dbg.log_event(
             "get_commands:done",
             format!(
@@ -827,6 +864,11 @@ pub async fn run_agent(
 
         // ── 1.5 実行前に AI の計画を表示 ──────────────────────────────────────
         // AI の txt コメントを先行表示（before tools run）
+        if should_require_todo_before_development_action(user_task, &commands, root) {
+            let summary = insert_autonomous_todo_for_development_action(&mut commands);
+            dbg.log_event("autonomous_todo:inserted", format!("summary={summary}"));
+        }
+
         let txt_lines: Vec<&str> = commands
             .iter()
             .filter_map(|c| {
@@ -1585,6 +1627,35 @@ mod tests {
             &commands,
             dir.path()
         ));
+    }
+
+    #[test]
+    fn autonomous_todo_is_inserted_before_development_action() {
+        let mut commands = vec![
+            AiCommand::Txt {
+                content: "計画: src/main.rs を最小変更で修正します".into(),
+            },
+            AiCommand::Edit {
+                path: "src/main.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+            },
+        ];
+
+        let summary = insert_autonomous_todo_for_development_action(&mut commands);
+
+        assert_eq!(summary, "src/main.rs を編集する");
+        assert!(matches!(commands[0], AiCommand::Txt { .. }));
+        match &commands[1] {
+            AiCommand::TodoWrite { todos } => {
+                assert_eq!(todos.len(), 1);
+                assert_eq!(todos[0].id, "auto-1");
+                assert_eq!(todos[0].status, crate::command::TodoStatus::Completed);
+                assert!(todos[0].content.contains("src/main.rs を編集する"));
+            }
+            other => panic!("expected auto todo_write, got {other:?}"),
+        }
+        assert!(matches!(commands[2], AiCommand::Edit { .. }));
     }
 
     #[test]
