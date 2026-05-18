@@ -87,15 +87,22 @@
     if (!labelMatches(text, interactive)) continue;
     if (!interactive && text.length > 40) continue;
 
-    const modalText = textOf(el.closest('[role="dialog"], [aria-modal="true"], main, body'));
+    const modalAnchor = el.closest('[role="dialog"], [aria-modal="true"], section, main, body');
+    const modalText = textOf(modalAnchor);
     const lowerModalText = modalText.toLowerCase();
-    if (
-      providerLabels.some((label) => modalText.includes(label)) ||
-      (authHints.some((hint) => modalText.includes(hint)) &&
-        ["Microsoft", "Apple", "Google"].some((provider) => modalText.includes(provider))) ||
+    const hasProviderLabel = providerLabels.some((label) => modalText.includes(label));
+    const hasAuthHint = authHints.some((hint) => modalText.includes(hint));
+    const hasSignIn =
       lowerModalText.includes("sign in") ||
       lowerModalText.includes("signin") ||
-      lowerModalText.includes("log in")
+      lowerModalText.includes("log in");
+    // dialog/section 内の interactive ボタンは無条件で許可（UI 変更対応）
+    const inDialog = !!el.closest('[role="dialog"], [aria-modal="true"], section');
+    if (
+      hasProviderLabel ||
+      hasSignIn ||
+      hasAuthHint ||
+      (interactive && inDialog)
     ) {
       target = interactiveFor(el);
       break;

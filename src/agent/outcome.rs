@@ -3,8 +3,9 @@
 /// `determine_outcome` と `apply_stop_hooks` を独立モジュールに分離することで
 /// runner.rs のサイズを縮小し、単体テストを書きやすくする。
 use super::task::{
-    is_deferring_development_message, is_incomplete_handoff_message, is_placeholder_bot_message,
-    is_placeholder_review_message, missing_referenced_project_paths,
+    is_ambiguous_file_fill_request, is_deferring_development_message,
+    is_incomplete_handoff_message, is_menu_selection_without_context, is_non_actionable_ack,
+    is_placeholder_bot_message, is_placeholder_review_message, missing_referenced_project_paths,
     task_requires_development_action, task_requires_file_update, task_requires_review_output,
 };
 use crate::executor::ToolResult;
@@ -82,17 +83,25 @@ pub(super) fn apply_stop_hooks(
         return outcome;
     }
 
-    // フック 1: 未完了 todo があれば続ける
+    // フック 1: 未完了 todo があれば続ける（非アクション系タスクは除外）
     let todos = todo_write::load(root);
     let unfinished_todos = todo_write::unfinished(&todos);
-    if !unfinished_todos.is_empty() {
+    let is_boundary_clarification = is_non_actionable_ack(user_task)
+        || is_menu_selection_without_context(user_task)
+        || is_ambiguous_file_fill_request(user_task);
+    if !unfinished_todos.is_empty() && !is_boundary_clarification {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
                 "{ctx}\n\n\
                 [⚠ todo_write に未完了タスクが残っています]\n\
-                完了報告の前に、TODO.JSON の未完了タスクを実行してください。\
-                `read_log todo` だけで止まらず、in_progress があればそのタスクを実行し、\
-                完了したら `todo_write` で completed に更新してください。\n\n\
+                完了報告の前に、TODO.JSON の未完了タスクを処理してください。\
+                `read_log todo` を読むだけで止まらず、in_progress があればそのタスクを実行し、\
+                完了したら `todo_write` で completed に更新してください。\
+                分割対象ファイルが存在しないなど、本質的に実行不能な情報だけが欠けている場合は、\
+                未完了TODOを「未実行で終了（理由）: ...」の内容に書き換えて completed にし、\
+                その直後に `bot` で不足情報を1つだけ具体的に報告してください。\
+                文章生成タスクでは、生成した本文を `file` の content または `bot` の message に直接入れられます。\
+                「生成するツールがない」という理由で止めないでください。\n\n\
                 [現在の TODO.JSON]\n{}\n\n\
                 ```json\n[{{\"type\":\"txt\",\"content\":\"TODO.JSON の in_progress タスクを実行します\"}},{{\"type\":\"read_log\",\"filename\":\"todo\"}}]\n```",
                 todo_write::format_todos_plain(&todos)
@@ -101,7 +110,10 @@ pub(super) fn apply_stop_hooks(
     }
 
     // フック 2: Rust プロジェクトでファイル編集後のコンパイル確認
-    if is_rust_project && has_successful_file_update && task_requires_development_action(user_task)
+    if is_rust_project
+        && has_successful_file_update
+        && task_requires_development_action(user_task)
+        && !is_boundary_clarification
     {
         let has_cmd_verification = done_log.iter().any(|e| e.contains(" Cmd("));
         if !has_cmd_verification {
@@ -161,6 +173,38 @@ pub(super) fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
         };
     }
 
+    // 新規タスクでツール未実行のまま bot を返すのは早期終了。
+    // JSON 再要求を挟むと turn は進むため、turn 番号ではなく done_log で判定する。
+    let is_boundary_clarification_task = is_non_actionable_ack(user_task)
+        || is_menu_selection_without_context(user_task)
+        || is_ambiguous_file_fill_request(user_task);
+    if is_done
+        && done_log.is_empty()
+        && tool_results.is_empty()
+        && !is_boundary_clarification_task
+        && !bot_message.map(is_placeholder_bot_message).unwrap_or(true)
+        && !bot_message
+            .map(is_deferring_development_message)
+            .unwrap_or(false)
+        && !bot_message
+            .map(is_incomplete_handoff_message)
+            .unwrap_or(false)
+    {
+        return TurnOutcome::NudgeForJson {
+            prompt: format!(
+                "{ctx}\n\n\
+                [⚠ New task boundary への最初の返答で bot を使っています]\n\
+                ツールを一切実行せずに完了報告しないでください。\
+                まず `glob` / `grep` / `read_file` で現在の作業ディレクトリを調査し、\
+                タスクに必要な情報を集めてから作業を進めてください。\n\
+                ```json\n\
+                [{{\"type\":\"txt\",\"content\":\"計画: まず現在の構成を確認してから作業を進めます\"}},\
+                {{\"type\":\"glob\",\"pattern\":\"src/**/*.rs\"}}]\n\
+                ```"
+            ),
+        };
+    }
+
     if is_done && bot_message.map(is_placeholder_bot_message).unwrap_or(true) {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
@@ -213,6 +257,9 @@ pub(super) fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
         && bot_message
             .map(is_deferring_development_message)
             .unwrap_or(false)
+        && !is_non_actionable_ack(user_task)
+        && !is_menu_selection_without_context(user_task)
+        && !is_ambiguous_file_fill_request(user_task)
     {
         return TurnOutcome::NudgeForJson {
             prompt: format!(
@@ -372,6 +419,10 @@ pub(super) fn determine_outcome(state: &TurnState<'_>) -> TurnOutcome {
         let action_hint = if task_requires_file_update(user_task) && !has_successful_file_update {
             "\nこの依頼はファイル内容の書き換え・翻訳タスクです。通常テキストで回答せず、変換後の全文を `file` コマンドで保存してください：\
             \n```json\n{\"type\": \"file\", \"path\": \"対象ファイル\", \"content\": \"（変換後の全文）\"}\n```"
+        } else if !read_files.is_empty() {
+            "\n読み込み済みファイルの内容がユーザー依頼そのものなら、段取り説明で止めず、今すぐ結果を `bot` の message に省略せず入れてください。\
+            文章生成・要約・分割出力は別ツールなしで `bot` / `file` に直接書けます。\
+            \n```json\n{\"type\": \"bot\", \"message\": \"（依頼された出力本文をここに省略せず書く）\"}\n```"
         } else if consecutive_txt >= 2 {
             "\n今すぐ `bot` コマンドで回答を出力してください。省略せず完全な内容を含めること。\
             \n```json\n{\"type\": \"bot\", \"message\": \"（完全な回答をここに）\"}\n```"

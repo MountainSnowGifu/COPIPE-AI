@@ -3,7 +3,7 @@
 /// run_agent() の状態（read_files / done_log）をターンごとにディスクに保存する。
 /// 20ターン上限・Ctrl+C・クラッシュ後も「続きから」再開できる。
 ///
-/// 保存先: ホームディレクトリ配下の .copipe_sessions/<path_hash16>/session.json
+/// 保存先: プロジェクトルート配下の .copipe_logs/session.json
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -41,10 +41,10 @@ pub struct SessionStore {
 impl SessionStore {
     /// root に紐づいたセッションストアを作成する
     pub fn new(root: &Path) -> Self {
-        let hash = path_hash16(root);
-        let dir = session_dir_for_hash(&hash);
+        let log_dir = root.join(crate::executor::LOG_DIR);
+        std::fs::create_dir_all(&log_dir).ok();
         Self {
-            session_path: dir.join("session.json"),
+            session_path: log_dir.join("session.json"),
         }
     }
 
@@ -156,51 +156,6 @@ impl SessionStore {
     }
 }
 
-// ─── ユーティリティ ───────────────────────────────────────────────────────────
-
-/// セッション保存ディレクトリのパスを返す
-fn home_sessions_dir() -> PathBuf {
-    crate::paths::home_dir()
-        .map(|h| h.join(".copipe_sessions"))
-        .unwrap_or_else(|| std::env::temp_dir().join("copipe_sessions"))
-}
-
-fn session_dir_for_hash(hash: &str) -> PathBuf {
-    let primary = home_sessions_dir().join(hash);
-    if ensure_writable_dir(&primary) {
-        return primary;
-    }
-
-    let fallback = std::env::temp_dir().join("copipe_sessions").join(hash);
-    ensure_writable_dir(&fallback);
-    fallback
-}
-
-fn ensure_writable_dir(dir: &Path) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let probe = dir.join(".write_probe");
-    match std::fs::write(&probe, b"ok") {
-        Ok(_) => {
-            let _ = std::fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// パスを16文字の16進ハッシュに変換する（ディレクトリ名用）
-fn path_hash16(path: &Path) -> String {
-    let s = path.display().to_string();
-    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3); // FNV prime
-    }
-    format!("{h:016x}")
-}
-
 // ─── テスト ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -234,21 +189,5 @@ mod tests {
 
         store.clear();
         assert!(!store.exists());
-    }
-
-    #[test]
-    fn test_path_hash16_is_consistent() {
-        let p = Path::new("/home/user/myproject");
-        let h1 = path_hash16(p);
-        let h2 = path_hash16(p);
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 16);
-    }
-
-    #[test]
-    fn test_path_hash16_different_paths() {
-        let h1 = path_hash16(Path::new("/home/user/project_a"));
-        let h2 = path_hash16(Path::new("/home/user/project_b"));
-        assert_ne!(h1, h2);
     }
 }

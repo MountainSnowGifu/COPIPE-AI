@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "project_dir": "/home/akira/デスクトップ/Rust/TEST",
+  "user_task": "タスクがこなせてません",
+  "turn_count": 3,
+  "saved_at": "2026-05-18 19:09:22 JST",
+  "done_log": [
+    "✓ Glob(**/*)",
+    "✓ ReadFile(p.txt)"
+  ],
+  "read_files": [
+    "p.txt"
+  ]
+}

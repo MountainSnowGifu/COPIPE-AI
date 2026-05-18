@@ -1,7 +1,17 @@
 [
   {
-    "id": "split-main",
-    "content": "main.rs を適切に分割する（計算処理・履歴管理・入出力処理など）",
+    "id": "1",
+    "content": "SF小説1万字の本文を生成する",
+    "status": "completed"
+  },
+  {
+    "id": "2",
+    "content": "未実行で終了（情報不足）: 本文を1000字ごとに10分割する",
+    "status": "completed"
+  },
+  {
+    "id": "3",
+    "content": "未実行で終了（情報不足）: novel_01〜10.txt を作成して保存する",
     "status": "completed"
   }
 ]

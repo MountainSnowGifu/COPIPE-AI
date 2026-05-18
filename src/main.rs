@@ -5,7 +5,7 @@ mod executor;
 mod paths;
 mod session;
 
-use agent::{SessionStore, build_system_prompt, run_agent};
+use agent::{SessionStore, build_system_prompt, is_clarification_only_task, run_agent};
 use color::{BOLD, CYAN_BOLD, DIM, GREEN_BOLD, RED_BOLD, RESET, YELLOW, use_unicode};
 use executor::{CheckpointManager, LOG_DIR, init_todo_log};
 use session::CopilotSession;
@@ -396,6 +396,17 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => break 'repl,
             }
+        }
+
+        // ── 非アクション系タスクは LLM を呼ばずに即応答 ─────────────
+        // 「続き」「OK」「1.」のような文脈なし入力は LLM に送ると BOT判定で止まるため、
+        // Rust 側でショートサーキットしてメッセージを表示する。
+        if is_clarification_only_task(&task) {
+            println!(
+                "\n{CYAN_BOLD}[AI]{RESET} 具体的な作業対象と内容を入力してください。\n\
+                {DIM}（例: \"src/main.rs の〇〇を修正して\" / \"cargo check して直して\"）{RESET}"
+            );
+            continue 'repl;
         }
 
         // ── 実行フェーズ（Ctrl+C でキャンセル） ───────────────────────

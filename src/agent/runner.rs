@@ -330,6 +330,154 @@ fn has_txt_command(commands: &[AiCommand]) -> bool {
     commands.iter().any(|c| matches!(c, AiCommand::Txt { .. }))
 }
 
+fn maybe_insert_todo_closure_for_blocked_bot(
+    commands: &mut Vec<AiCommand>,
+    root: &Path,
+) -> Option<usize> {
+    if commands
+        .iter()
+        .any(|c| matches!(c, AiCommand::TodoWrite { .. }))
+    {
+        return None;
+    }
+    if commands
+        .iter()
+        .any(|c| !matches!(c, AiCommand::Txt { .. } | AiCommand::Bot { .. }))
+    {
+        return None;
+    }
+
+    let bot_message = commands.iter().find_map(|c| {
+        if let AiCommand::Bot { message, content } = c {
+            message.as_deref().or(content.as_deref())
+        } else {
+            None
+        }
+    })?;
+    if !looks_like_blocked_final_message(bot_message) {
+        return None;
+    }
+
+    let todos = todo_write::load(root);
+    let unfinished_count = todos
+        .iter()
+        .filter(|todo| todo.status != TodoStatus::Completed)
+        .count();
+    if unfinished_count == 0 {
+        return None;
+    }
+
+    let closed_todos = todos
+        .into_iter()
+        .map(|mut todo| {
+            if todo.status != TodoStatus::Completed {
+                todo.content = format!("未実行で終了（情報不足）: {}", todo.content);
+                todo.status = TodoStatus::Completed;
+            }
+            todo
+        })
+        .collect();
+    let insert_at = commands
+        .iter()
+        .position(|c| matches!(c, AiCommand::Bot { .. }))
+        .unwrap_or(commands.len());
+    commands.insert(
+        insert_at,
+        AiCommand::TodoWrite {
+            todos: closed_todos,
+        },
+    );
+    Some(unfinished_count)
+}
+
+fn looks_like_blocked_final_message(message: &str) -> bool {
+    let m = message.trim();
+    if m.chars().count() < 40 {
+        return false;
+    }
+
+    let blocker = [
+        "できません",
+        "実行できません",
+        "進めることができません",
+        "作業不能",
+        "不足",
+        "欠落",
+        "存在しません",
+        "見つかりません",
+        "提供",
+        "必要です",
+        "必要があります",
+    ]
+    .iter()
+    .any(|p| m.contains(*p));
+    let concrete_missing_input = [
+        "ファイル",
+        "本文",
+        "対象",
+        "情報",
+        "入力",
+        "内容",
+        "分割対象",
+        "作業ディレクトリ",
+    ]
+    .iter()
+    .any(|p| m.contains(*p));
+    let completed_work = [
+        "実装しました",
+        "修正しました",
+        "作成しました",
+        "更新しました",
+        "保存しました",
+        "完了しました",
+    ]
+    .iter()
+    .any(|p| m.contains(*p));
+
+    blocker && concrete_missing_input && !completed_work
+}
+
+fn asks_for_execution_confirmation(question: &str) -> bool {
+    let q = question.trim();
+    if q.chars().count() < 8 {
+        return false;
+    }
+
+    let asks_permission = [
+        "よいですか",
+        "いいですか",
+        "よろしいですか",
+        "進めますか",
+        "進めてよい",
+        "実行してよい",
+        "実行しますか",
+        "作成してよい",
+        "生成してよい",
+        "保存してよい",
+        "出力してよい",
+        "してもよい",
+        "していい",
+    ]
+    .iter()
+    .any(|p| q.contains(*p));
+    let already_requested_action = [
+        "生成", "作成", "出力", "保存", "分割", "修正", "実装", "更新", "変更", "実行",
+    ]
+    .iter()
+    .any(|p| q.contains(*p));
+
+    asks_permission && already_requested_action
+}
+
+fn has_execution_confirmation_ask_user(commands: &[AiCommand]) -> bool {
+    commands.iter().any(|c| {
+        matches!(
+            c,
+            AiCommand::AskUser { question, .. } if asks_for_execution_confirmation(question)
+        )
+    })
+}
+
 fn txt_contains_initial_plan(commands: &[AiCommand]) -> bool {
     commands.iter().any(|c| {
         matches!(
@@ -555,17 +703,19 @@ async fn get_commands(
         let blocks2 = get_codeblocks_from_dom(&session.page, n2).await;
         if blocks2.is_empty() {
             write_browser_log(root, "still no JSON code block after retry", session).await;
-            let retry_text = read_nth_ai_text(&session.page, n2).await;
-            if let Some(message) = substantive_plain_text_response(&retry_text)
-                .or_else(|| substantive_plain_text_response(&first_text))
-            {
-                return Ok((
-                    vec![AiCommand::Bot {
-                        message: Some(message),
-                        content: None,
-                    }],
-                    Vec::new(),
-                ));
+            if !is_new_task_boundary_prompt(prompt) {
+                let retry_text = read_nth_ai_text(&session.page, n2).await;
+                if let Some(message) = substantive_plain_text_response(&retry_text)
+                    .or_else(|| substantive_plain_text_response(&first_text))
+                {
+                    return Ok((
+                        vec![AiCommand::Bot {
+                            message: Some(message),
+                            content: None,
+                        }],
+                        Vec::new(),
+                    ));
+                }
             }
         }
         return Ok(parse_blocks(&blocks2));
@@ -583,6 +733,10 @@ fn plain_json_block(text: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn is_new_task_boundary_prompt(prompt: &str) -> bool {
+    prompt.contains("## New task boundary")
 }
 
 fn substantive_plain_text_response(text: &str) -> Option<String> {
@@ -868,6 +1022,9 @@ pub async fn run_agent(
             let summary = insert_autonomous_todo_for_development_action(&mut commands);
             dbg.log_event("autonomous_todo:inserted", format!("summary={summary}"));
         }
+        if let Some(count) = maybe_insert_todo_closure_for_blocked_bot(&mut commands, root) {
+            dbg.log_event("todo_closure:inserted", format!("unfinished={count}"));
+        }
 
         let txt_lines: Vec<&str> = commands
             .iter()
@@ -965,9 +1122,12 @@ pub async fn run_agent(
 
         // ── 2. ツールを実行 ───────────────────────────────────────────────
         let is_done = commands.iter().any(|c| matches!(c, AiCommand::Bot { .. }))
-            && !commands
-                .iter()
-                .any(|c| !matches!(c, AiCommand::Bot { .. } | AiCommand::Txt { .. }));
+            && !commands.iter().any(|c| {
+                !matches!(
+                    c,
+                    AiCommand::Bot { .. } | AiCommand::Txt { .. } | AiCommand::TodoWrite { .. }
+                )
+            });
         let bot_message = commands.iter().find_map(|c| {
             if let AiCommand::Bot { message, content } = c {
                 message
@@ -1068,6 +1228,29 @@ pub async fn run_agent(
                 `mkdir` と `file` で分割済みファイルを作成してください。\
                 プレースホルダや要約だけのファイルは禁止です。原文の該当本文をそのまま入れてください。\n\
                 ```json\n[{{\"type\":\"mkdir\",\"path\":\"出力ディレクトリ\"}},{{\"type\":\"file\",\"path\":\"出力ディレクトリ/01.md\",\"content\":\"（原文から抽出した本文）\"}}]\n```"
+            );
+            dbg.turn_end();
+            continue;
+        }
+
+        // 依頼済み作業の実行確認だけを ask_user で挟むのを止める。
+        // ログでは長文生成タスクで「生成してよいですか？」と確認してターンを消費し、
+        // その後に本文を保持できないと誤判断する流れが発生していた。
+        if !is_done && has_execution_confirmation_ask_user(&commands) {
+            counters.consecutive_ask_user += 1;
+            counters.consecutive_txt += 1;
+            let ctx = build_context_header(user_task, &read_files, root, &done_log);
+            prompt = format!(
+                "{ctx}\n\n\
+                [⚠ 依頼済み作業を実行前確認だけで止めています]\n\
+                ユーザーが既に依頼している生成・作成・保存・修正などの作業について、\
+                「実行してよいですか？」という ask_user は不要です。\
+                追加確認せず、手元の依頼文とツール結果に基づいて次の実作業を進めてください。\
+                長文生成や分割出力は、生成した本文を `bot` の message または `file` の content に直接入れられます。\
+                文章を生成するための別ツールは不要です。\n\
+                ```json\n\
+                {{\"type\":\"bot\",\"message\":\"（依頼された生成物・分割結果・完了報告を省略せずここに書く）\"}}\n\
+                ```"
             );
             dbg.turn_end();
             continue;
@@ -1491,6 +1674,19 @@ mod tests {
     }
 
     #[test]
+    fn execution_confirmation_ask_user_is_detected() {
+        let commands = vec![AiCommand::AskUser {
+            question: "SF小説1万字の本文をこの場で生成してよいですか？".into(),
+            hint: Some("はい / いいえ".into()),
+        }];
+
+        assert!(has_execution_confirmation_ask_user(&commands));
+        assert!(!asks_for_execution_confirmation(
+            "どのファイルを対象にしますか？"
+        ));
+    }
+
+    #[test]
     fn short_open_ended_development_task_detection_is_scoped() {
         assert!(is_short_open_ended_development_task("IRの拡張"));
         assert!(is_short_open_ended_development_task("UI改善"));
@@ -1529,6 +1725,40 @@ mod tests {
             TurnOutcome::NudgeForJson { prompt } => {
                 assert!(prompt.contains("開発タスクを質問だけで終了"));
                 assert!(prompt.contains("ログ内のファイル名や crate 名"));
+            }
+            other => panic!("expected nudge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bot_before_any_tool_is_nudged_even_after_json_retry_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let message = "了解しました。現在のプロジェクトを確認して、必要な改善を進めます。";
+
+        let outcome = determine_outcome(&TurnState {
+            user_task: "AI_LOGを参考に現在のソースコードを改善したい",
+            bot_message: Some(message),
+            is_done: true,
+            only_txt: false,
+            tool_results: &[],
+            turn: 1,
+            ctx: "CTX",
+            consecutive_txt: 1,
+            read_files: &HashSet::new(),
+            done_log: &[],
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 0,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
+        });
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("New task boundary への最初の返答で bot"));
+                assert!(prompt.contains("\"type\":\"glob\""));
             }
             other => panic!("expected nudge, got {other:?}"),
         }
@@ -1608,9 +1838,54 @@ mod tests {
                 assert!(prompt.contains("TODO.JSON の未完了タスク"));
                 assert!(prompt.contains("[2] in_progress: TODO.JSON の未完了タスクを実行"));
                 assert!(prompt.contains("completed に更新"));
+                assert!(prompt.contains("生成した本文を `file` の content"));
             }
             other => panic!("expected todo stop hook nudge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn blocked_final_bot_closes_unfinished_todos_before_bot() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join(crate::executor::LOG_DIR);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let todos = vec![
+            crate::command::TodoItem {
+                id: "1".into(),
+                content: "本文を1,000字ごとに10分割".into(),
+                status: crate::command::TodoStatus::InProgress,
+            },
+            crate::command::TodoItem {
+                id: "2".into(),
+                content: "novel_01〜10.txt の10ファイル作成".into(),
+                status: crate::command::TodoStatus::Pending,
+            },
+        ];
+        std::fs::write(
+            log_dir.join(todo_write::TODO_FILE),
+            serde_json::to_string_pretty(&todos).unwrap(),
+        )
+        .unwrap();
+        let mut commands = vec![AiCommand::Bot {
+            message: Some(
+                "作業ディレクトリ内に小説本文ファイルが存在しないため、分割対象の本文が不足しており実行できません。"
+                    .into(),
+            ),
+            content: None,
+        }];
+
+        let closed = maybe_insert_todo_closure_for_blocked_bot(&mut commands, dir.path());
+
+        assert_eq!(closed, Some(2));
+        match &commands[0] {
+            AiCommand::TodoWrite { todos } => {
+                assert_eq!(todos.len(), 2);
+                assert!(todos.iter().all(|t| t.status == TodoStatus::Completed));
+                assert!(todos[0].content.starts_with("未実行で終了（情報不足）:"));
+            }
+            other => panic!("expected todo_write before bot, got {other:?}"),
+        }
+        assert!(matches!(commands[1], AiCommand::Bot { .. }));
     }
 
     #[test]
@@ -2076,11 +2351,57 @@ mod tests {
     }
 
     #[test]
+    fn only_txt_after_read_file_nudges_to_emit_generated_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut read_files = HashSet::new();
+        read_files.insert(PathBuf::from("p.txt"));
+
+        let outcome = determine_outcome(&TurnState {
+            user_task: "タスクがこなせてません",
+            bot_message: None,
+            is_done: false,
+            only_txt: true,
+            tool_results: &[],
+            turn: 2,
+            ctx: "CTX",
+            consecutive_txt: 0,
+            read_files: &read_files,
+            done_log: &["✓ ReadFile(p.txt)".into()],
+            root: dir.path(),
+            has_successful_file_update: false,
+            consecutive_read_file: 0,
+            consecutive_ask_user: 0,
+            consecutive_edit_fail: 0,
+            last_failed_edit_path: "",
+            consecutive_empty_grep: 0,
+        });
+
+        match outcome {
+            TurnOutcome::NudgeForJson { prompt } => {
+                assert!(prompt.contains("読み込み済みファイルの内容がユーザー依頼そのもの"));
+                assert!(prompt.contains("文章生成・要約・分割出力"));
+                assert!(prompt.contains("\"type\": \"bot\""));
+            }
+            other => panic!("expected NudgeForJson, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn plain_text_signin_later_prompt_is_not_treated_as_bot() {
         let text = "サインインするとさらに便利に利用できます。Microsoft で続行、Google で続行、Apple で続行、または後で選択できます。"
             .repeat(4);
 
         assert!(substantive_plain_text_response(&text).is_none());
+    }
+
+    #[test]
+    fn new_task_boundary_prompt_disables_plain_text_bot_fallback() {
+        assert!(is_new_task_boundary_prompt(
+            "## New task boundary\n次のアクションを返してください"
+        ));
+        assert!(!is_new_task_boundary_prompt(
+            "## Dynamic context\n次のアクションを返してください"
+        ));
     }
 
     #[test]
